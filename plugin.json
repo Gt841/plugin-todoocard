@@ -1,0 +1,16 @@
+{
+  "name": "plugin-todoocard",
+  "author": "Gt841",
+  "url": "https://github.com/Gt841/plugin-todoocard",
+  "version": "0.0.1",
+  "minAppVersion": "3.0.1",
+  "backends": ["windows", "linux", "darwin"],
+  "frontends": ["desktop", "desktop-window"],
+  "displayName": { "en_US": "TodooCard", "zh_CN": "土豆片" },
+  "description": {
+    "en_US": "Manage a local TodooCard eink core and transfer images from SiYuan.",
+    "zh_CN": "在思源中管理本地土豆片墨水屏核心并传图。"
+  },
+  "readme": { "default": "README.md" },
+  "keywords": ["todoocard", "eink", "bluetooth", "墨水屏"]
+}
