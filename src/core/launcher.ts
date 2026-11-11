@@ -51,9 +51,11 @@ export async function launchCore(mode: LaunchMode, ctx: LaunchCtx): Promise<{ pi
   env.PORT = String(ctx.port); // server.py reads PORT from env (no --port flag); covers direct & disclaim, terminal gets it via template
   if (mode === "direct") {
     const child = spawn(ctx.python, [ctx.serverPy], { cwd: ctx.einkDir, env, detached: process.platform !== "win32", stdio: ["ignore", fs.openSync(ctx.logFile, "a"), fs.openSync(ctx.logFile, "a")] });
+    child.on("error", () => {}); // swallow async spawn error so a missing python cannot crash the host (mirrors runSpawn/killTree)
     child.unref();
-    writePid(ctx.pidFile, child.pid!);
-    return { pid: child.pid! };
+    if (child.pid === undefined) throw new Error("core spawn failed: python executable not found or not spawnable");
+    writePid(ctx.pidFile, child.pid);
+    return { pid: child.pid };
   }
   if (mode === "disclaim") {
     const child = spawn(ctx.python, [ctx.disclaimPy, ctx.python, ctx.serverPy], { cwd: ctx.einkDir, env, stdio: ["ignore", "pipe", fs.openSync(ctx.logFile, "a")] });
@@ -74,7 +76,9 @@ export async function launchCore(mode: LaunchMode, ctx: LaunchCtx): Promise<{ pi
   fs.writeFileSync(cmdFile, renderTerminalCommand(tpl, { python: ctx.python, einkDir: ctx.einkDir, pidFile: ctx.pidFile, logFile: ctx.logFile, port: ctx.port }));
   fs.chmodSync(cmdFile, 0o755);
   try { fs.unlinkSync(ctx.pidFile); } catch {}
-  spawn("open", ["-a", "Terminal", cmdFile], { detached: true, stdio: "ignore" }).unref();
+  const opener = spawn("open", ["-a", "Terminal", cmdFile], { detached: true, stdio: "ignore" });
+  opener.on("error", () => {}); // swallow async spawn error; the pidFile poll below times out if Terminal never starts
+  opener.unref();
   const pid = await new Promise<number>((resolve, reject) => {
     const start = Date.now();
     const iv = setInterval(() => {
