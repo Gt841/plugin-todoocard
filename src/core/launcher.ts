@@ -89,3 +89,7 @@ export async function launchCore(mode: LaunchMode, ctx: LaunchCtx): Promise<{ pi
   });
   return { pid };
 }
+
+export function terminalProbeCommand(ctx: LaunchCtx, resultFile: string): string {
+  return `#!/bin/bash\ncd "${ctx.einkDir}" || exit 1\n"${ctx.python}" "${ctx.probePy}" "${resultFile}" preflight-terminal\nsleep 3\n`;
+}
