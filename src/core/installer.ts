@@ -31,9 +31,11 @@ function defaultDownload(url: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith("http://") ? http : https;
     const file = fs.createWriteStream(dest);
+    const onFileError = (e: Error) => { try { fs.unlinkSync(dest); } catch {} reject(e); };
+    file.on("error", onFileError);
     mod.get(url, (res) => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        file.close(); fs.unlinkSync(dest);
+        file.removeListener("error", onFileError); file.close(); fs.unlinkSync(dest);
         defaultDownload(res.headers.location, dest).then(resolve, reject); return;
       }
       if (res.statusCode !== 200) { file.close(); fs.unlinkSync(dest); reject(new Error(`HTTP ${res.statusCode} for ${url}`)); return; }
