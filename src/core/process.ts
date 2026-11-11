@@ -24,7 +24,7 @@ export function runSpawn(cmd: string, args: string[], opts: { cwd?: string; env?
 export function killTree(pid: number): void {
   if (!pid || pid <= 0) return;
   if (process.platform === "win32") {
-    try { spawn("taskkill", ["/PID", String(pid), "/T", "/F"]); } catch {}
+    try { const tk = spawn("taskkill", ["/PID", String(pid), "/T", "/F"]); tk.on("error", () => {}); } catch {}
   } else {
     try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch {} }
   }

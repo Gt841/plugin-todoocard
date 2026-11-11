@@ -14,6 +14,7 @@ describe("runSpawn", () => {
   it("flags timeout and kills", async () => {
     const r = await runSpawn(process.execPath, ["-e", "setTimeout(()=>{},5000)"], { timeoutMs: 300 });
     expect(r.timedOut).toBe(true);
+    expect(r.signal).toBe("SIGKILL");
   });
 });
 
