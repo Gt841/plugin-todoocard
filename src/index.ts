@@ -86,6 +86,7 @@ export default class TodoocardPlugin extends Plugin {
   private log(msg: string) { this.logText += `[${new Date().toLocaleTimeString()}] ${msg}\n`; this.panel?.$set({ log: this.logText }); }
 
   private openPanel() {
+    this.panel?.$destroy(); this.dialog?.destroy();
     this.dialog = new Dialog({ title: "土豆片控制台", width: "720px", height: "560px", content: `<div id="tcMount"></div>` });
     const target = this.dialog.element.querySelector("#tcMount") as HTMLElement;
     this.panel = new ControlPanel({ target, props: this.panelProps() });
@@ -94,13 +95,21 @@ export default class TodoocardPlugin extends Plugin {
     this.panel.$on("stop", () => this.doStop());
     this.panel.$on("recheck", () => { this.store.setCachedMode(null as any); this.log("已清除模式缓存，下次启动重新预检"); });
     this.panel.$on("openweb", () => this.openWeb());
-    this.panel.$on("opendir", () => window.require?.("child_process").spawn("open", [this.store.coreDir]));
+    this.panel.$on("opendir", async () => {
+      try {
+        const remote = window.require?.("@electron/remote");
+        if (!remote?.shell) { showMessage("当前环境不支持打开目录", 5000, "error"); return; }
+        const err = await remote.shell.openPath(this.store.coreDir);
+        if (err) { this.log("打开目录失败: " + err); showMessage(err, 5000, "error"); }
+      } catch (e) { this.log("打开目录失败: " + e); showMessage(String(e), 5000, "error"); }
+    });
     this.panel.$on("changedir", async () => {
       try {
         const remote = window.require?.("@electron/remote");
         if (!remote?.dialog) { showMessage("当前环境不支持目录选择", 5000, "error"); return; }
         const r = await remote.dialog.showOpenDialog({ title: "选择土豆片核心存储目录", properties: ["openDirectory", "createDirectory"] });
         if (r.canceled || !r.filePaths?.length) return;
+        if (this.running) { this.lifecycle.stop(); this.running = false; this.currentMode = ""; this.log("更改目录前已停止运行中的核心"); }
         this.settings.coreDir = r.filePaths[0];
         await this.saveData(STORAGE_NAME, this.settings);
         this.rebuild(); this.refresh();
