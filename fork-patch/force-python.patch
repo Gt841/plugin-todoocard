@@ -1,5 +1,5 @@
 diff --git a/card.py b/card.py
-index 2733f51..b9798af 100644
+index 2733f51..a1a7184 100644
 --- a/card.py
 +++ b/card.py
 @@ -15,6 +15,7 @@ from __future__ import annotations
@@ -10,7 +10,7 @@ index 2733f51..b9798af 100644
  import random
  import shutil
  import sqlite3
-@@ -276,6 +277,34 @@ class CardService:
+@@ -276,6 +277,45 @@ class CardService:
              _LOGGER.debug("卡片扫描失败: %s", e)
              return None
  
@@ -42,10 +42,46 @@ index 2733f51..b9798af 100644
 +
 +        return asyncio.run(_discover())
 +
++    def _pair_python(self, device_id: str) -> dict:
++        """纯 Python 模式没有 Swift 配对工具：macOS 的系统配对要在 系统设置→蓝牙 完成。
++
++        返回友好引导，而不是编译/调用 mac-image-transfer（后者依赖无授权 skill_dir，
++        纯 Python 模式下必然 exit 127）。卡片长按背面 5 秒进入配对窗口后到系统设置里
++        配对；完成后回 Web UI 扫描/绑定并发送。
++        """
++        msg = ("纯 Python 模式不使用 Swift 配对工具。请长按卡片背面按钮 5 秒进入配对窗口，"
++               "再到 系统设置→蓝牙 中配对 TodooCard；配对完成后回到本页扫描/绑定并发送。")
++        return {"ok": False, "output": msg, "message": msg, "guidance": True}
++
      async def _pair_watch_loop(self):
          """每 15 秒看一眼：卡片进入配对窗口就立刻连上去完成系统配对。
  
-@@ -1218,7 +1247,7 @@ class CardService:
+@@ -329,6 +369,10 @@ class CardService:
+ 
+         async def _run():
+             try:
++                if sys.platform == "darwin" and os.environ.get("TODOOCARD_FORCE_PYTHON") == "1":
++                    self._pair_lines = [self._pair_python(dev)["message"]]
++                    self._pair_state = "fail"
++                    return
+                 sender, _ = await asyncio.get_running_loop().run_in_executor(None, self._ensure_bins)
+                 async with BLE_GUARD:
+                     proc = await asyncio.create_subprocess_exec(
+@@ -365,6 +409,13 @@ class CardService:
+ 
+     async def _run_pair(self, device_id: str) -> bool:
+         try:
++            if sys.platform == "darwin" and os.environ.get("TODOOCARD_FORCE_PYTHON") == "1":
++                guidance = self._pair_python(device_id)["message"]
++                self.cfg["pair_log"] = guidance
++                self._save_cfg()
++                self._emit()
++                _LOGGER.info("纯 Python 模式：跳过 Swift 自动配对。%s", guidance)
++                return False
+             sender, _ = await asyncio.get_running_loop().run_in_executor(None, self._ensure_bins)
+             r = await asyncio.get_running_loop().run_in_executor(
+                 None, lambda: subprocess.run([str(sender), "--pair", "--id", device_id],
+@@ -1218,7 +1269,7 @@ class CardService:
          return sender, conv
  
      def _build_payload(self, image_path: Path) -> dict:
@@ -54,7 +90,7 @@ index 2733f51..b9798af 100644
              return self._build_payload_python(image_path)
          sender, conv = self._ensure_bins()
          work = self.cards_dir / "work"
-@@ -1271,7 +1300,7 @@ class CardService:
+@@ -1271,7 +1322,7 @@ class CardService:
          return False
  
      def _send_blocking(self, image_path: Path, wait_sec: float | None = None) -> dict:
@@ -63,7 +99,30 @@ index 2733f51..b9798af 100644
              return self._send_python(image_path, wait_sec)
          return self._send_macos(image_path, wait_sec)
  
-@@ -1783,6 +1812,12 @@ def make_routes():
+@@ -1286,9 +1337,12 @@ class CardService:
+                                   log=lambda m: _LOGGER.info("%s", m),
+                                   timeout=wait_sec or 120))
+             res["seconds"] = round(time.time() - t0, 1)
++            # 共享 send() 无条件读 res["output"]（_friendly_error/_retryable/回传），补齐避免 KeyError
++            res.setdefault("output", res.get("message", ""))
+             return res
+         except Exception as e:
+-            return {"ok": False, "seconds": round(time.time() - t0, 1), "message": str(e)}
++            return {"ok": False, "seconds": round(time.time() - t0, 1),
++                    "message": str(e), "output": str(e)}
+ 
+     def _send_macos(self, image_path: Path, wait_sec: float | None = None) -> dict:
+         started = time.time()
+@@ -1699,6 +1753,8 @@ def make_routes():
+         dev = (body or {}).get("device_id") or svc.cfg.get("device_id")
+         if not dev:
+             return web.json_response({"ok": False, "error": "缺少 device_id"}, status=400)
++        if sys.platform == "darwin" and os.environ.get("TODOOCARD_FORCE_PYTHON") == "1":
++            return web.json_response(svc._pair_python(dev))
+         try:
+             sender, _ = await asyncio.get_running_loop().run_in_executor(None, svc._ensure_bins)
+             r = await asyncio.get_running_loop().run_in_executor(
+@@ -1783,6 +1839,12 @@ def make_routes():
  
      async def _scan(request):
          svc = current()

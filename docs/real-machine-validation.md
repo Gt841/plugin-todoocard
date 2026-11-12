@@ -89,7 +89,7 @@ lsof -nP -iTCP:8199 -sTCP:LISTEN
 
 **操作**：
 1. 控制台点「打开传图界面」→ 思源页签内嵌 `http://127.0.0.1:8199` 的核心 Web UI。
-2. 按 [docs/macos-pairing.md](macos-pairing.md)：先在**系统设置 → 蓝牙**里配对 TodooCard。
+2. 按 [docs/macos-pairing.md](macos-pairing.md)：先在**系统设置 → 蓝牙**里配对 TodooCard。纯 Python 模式下 Web UI「开始配对」不编译 Swift，只显示系统配对引导（修复前会报 `build_sender.sh` exit 127）；配对以系统设置为准。
 3. **唤醒卡片**（上电/长按按键——卡片平时不广播，扫描前必须唤醒）。
 4. Web UI 点「扫描附近设备」→ 列表出现 TodooCard → 点「用这台」绑定。
 5. 选一张测试图 → 发送。
