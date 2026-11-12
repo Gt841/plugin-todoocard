@@ -1,5 +1,5 @@
 diff --git a/card.py b/card.py
-index 2733f51..9088adc 100644
+index 2733f51..b9798af 100644
 --- a/card.py
 +++ b/card.py
 @@ -15,6 +15,7 @@ from __future__ import annotations
@@ -10,7 +10,42 @@ index 2733f51..9088adc 100644
  import random
  import shutil
  import sqlite3
-@@ -1218,7 +1219,7 @@ class CardService:
+@@ -276,6 +277,34 @@ class CardService:
+             _LOGGER.debug("卡片扫描失败: %s", e)
+             return None
+ 
++    def _scan_python(self) -> list:
++        """纯 Python（bleak）扫描：列出所有广播 manufacturer=0x5053 的设备。
++
++        供 Web UI「扫描附近设备」在 macOS 纯 Python 模式下使用，替代 Swift
++        `mac-image-transfer --list`（后者依赖无授权 skill_dir）。输出行含
++        id=<UUID>，与 Web UI 正则 /id=([0-9A-Fa-f-]{36})/ 对齐；macOS 上 bleak
++        的 addr 即 CoreBluetooth UUID。不做 screen/target/name 过滤——发现阶段
++        要能看到未绑定的卡片。卡片平时不广播，扫描前需唤醒（上电/长按按键）。
++        """
++        from bleak import BleakScanner
++
++        async def _discover():
++            devs = await BleakScanner.discover(timeout=8, return_adv=True)
++            lines = []
++            for addr, (dev, adv) in devs.items():
++                mfr = (adv.manufacturer_data or {})
++                if 0x5053 not in mfr:
++                    continue
++                name = (dev.name or adv.local_name or "").strip()
++                rssi = getattr(adv, "rssi", None)
++                line = f"id={addr} manufacturer=0x5053 name={name}"
++                if rssi is not None:
++                    line += f" rssi={rssi}"
++                lines.append(line)
++            return lines
++
++        return asyncio.run(_discover())
++
+     async def _pair_watch_loop(self):
+         """每 15 秒看一眼：卡片进入配对窗口就立刻连上去完成系统配对。
+ 
+@@ -1218,7 +1247,7 @@ class CardService:
          return sender, conv
  
      def _build_payload(self, image_path: Path) -> dict:
@@ -19,7 +54,7 @@ index 2733f51..9088adc 100644
              return self._build_payload_python(image_path)
          sender, conv = self._ensure_bins()
          work = self.cards_dir / "work"
-@@ -1271,7 +1272,7 @@ class CardService:
+@@ -1271,7 +1300,7 @@ class CardService:
          return False
  
      def _send_blocking(self, image_path: Path, wait_sec: float | None = None) -> dict:
@@ -28,3 +63,16 @@ index 2733f51..9088adc 100644
              return self._send_python(image_path, wait_sec)
          return self._send_macos(image_path, wait_sec)
  
+@@ -1783,6 +1812,12 @@ def make_routes():
+ 
+     async def _scan(request):
+         svc = current()
++        if sys.platform == "darwin" and os.environ.get("TODOOCARD_FORCE_PYTHON") == "1":
++            try:
++                lines = await asyncio.get_running_loop().run_in_executor(None, svc._scan_python)
++            except Exception as e:
++                return web.json_response({"ok": False, "error": f"扫描失败: {e}"}, status=500)
++            return web.json_response({"ok": True, "devices": lines, "raw": "\n".join(lines)})
+         try:
+             sender, _ = await asyncio.get_running_loop().run_in_executor(None, svc._ensure_bins)
+         except Exception as e:
