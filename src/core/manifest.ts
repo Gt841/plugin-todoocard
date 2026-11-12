@@ -7,16 +7,26 @@ export function platformKey(platform: string, arch: string): string {
 
 export function parseManifest(text: string): Manifest {
   const obj = JSON.parse(text);
-  if (!obj || typeof obj.version !== "string" || typeof obj.platforms !== "object" || !obj.platforms) {
-    throw new Error("invalid manifest: need version + platforms");
+  if (!obj || typeof obj.version !== "string"
+      || typeof obj.coreVersion !== "string"
+      || typeof obj.coreCommit !== "string"
+      || typeof obj.platforms !== "object" || !obj.platforms) {
+    throw new Error("invalid manifest: need version + coreVersion + coreCommit + platforms");
   }
   return obj as Manifest;
 }
 
+const REQUIRED_FIELDS: (keyof PlatformEntry)[] = [
+  "sourceUrl", "sourceSha256", "pythonUrl", "pythonSha256",
+  "extensionUrl", "extensionSha256",
+];
+
 export function selectPlatform(m: Manifest, key: string): PlatformEntry {
   const entry = m.platforms[key];
   if (!entry) throw new Error(`manifest has no platform entry: ${key}`);
-  if (!entry.pythonUrl || !entry.einkUrl) throw new Error(`incomplete platform entry: ${key}`);
+  for (const f of REQUIRED_FIELDS) {
+    if (!entry[f]) throw new Error(`incomplete platform entry: ${key} (missing ${f})`);
+  }
   return entry;
 }
 

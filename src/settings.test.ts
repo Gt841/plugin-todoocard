@@ -1,10 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_SETTINGS, normalizeLaunch, resolveModes } from "./settings";
+import { DEFAULT_SETTINGS, DIST_MANIFEST_URL, normalizeLaunch, resolveModes } from "./settings";
 
 describe("settings", () => {
   it("defaults to auto launch and port 8199", () => {
     expect(DEFAULT_SETTINGS.launch).toBe("auto");
     expect(DEFAULT_SETTINGS.port).toBe(8199);
+  });
+  it("defaults manifestUrl to the published dist Pages manifest", () => {
+    expect(DEFAULT_SETTINGS.manifestUrl).toBe(DIST_MANIFEST_URL);
+    expect(DEFAULT_SETTINGS.manifestUrl).toMatch(/^https:\/\/.+\/manifest\.json$/);
   });
   it("normalizeLaunch accepts valid modes", () => {
     expect(normalizeLaunch("direct")).toBe("direct");

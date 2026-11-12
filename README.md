@@ -11,6 +11,23 @@ SiYuan desktop plugin that manages a local TodooCard e-ink core.
 
 Supported: Windows, Linux, macOS (desktop frontends only, SiYuan ≥ 3.0.1).
 
+## 分发模型（v2）
+
+核心源码与便携 Python **直接引用上游**，我们不再分发 fork 全量包：
+
+| 资产 | 来源 |
+| --- | --- |
+| 上游源码 tarball（松散 `.py`） | `shidaifufen/todoocard-eink` 的 **commit sha**（`archive/<sha>.tar.gz`） |
+| 便携 Python | astral-sh `python-build-standalone` 官方 `install_only` |
+| 版本匹配扩展包（`apply.py` + `extension.json`） | 独立仓库 `Gt841/todoocard-core-dist` 的 GitHub Releases |
+| `manifest.json`（v2） | 同一仓库的 GitHub Pages |
+
+安装流程：读 manifest → 三资产下载 + 逐个 sha256 校验 → 解压归一化（剥 `todoocard-eink-<sha>/` 与 `python/` 顶层）→ 便携 Python 跑 `pip install -r requirements.txt` → 跑 `apply.py` 注入必要改动 → 原子替换 → 写 `core.json`（含 `coreVersion` / `coreCommit`）。任一步失败即中止，旧核心完好。
+
+`apply.py` 用**锚点断言 + 幂等 + 编译校验**守住版本匹配：上游源码漂移（锚点消失/变形/多处）或 `coreVersion`/`coreCommit` 不符 → 非 0 退出，控制台提示「上游版本可能已漂移」，维护者重基扩展包。
+
+> 当前状态（2026-11-12）：**dist 已上线**——仓库 `Gt841/todoocard-core-dist`、Release `v1.0.11`、Pages manifest 均已发布，插件默认 `manifestUrl` 已指向 `https://gt841.github.io/todoocard-core-dist/manifest.json`（可在设置里覆盖）。线上三资产 sha 与全链路（含 pip、apply.py、py_compile）已复核通过。**仍待人工**：真机 BLE 全流程验证、插件集市发版。
+
 ## macOS pairing note
 
 Pair the TodooCard device in **System Settings → Bluetooth** first, before launching the core from this plugin.
@@ -19,30 +36,15 @@ Pair the TodooCard device in **System Settings → Bluetooth** first, before lau
 
 ## 维护者托管 / Maintainer hosting
 
-普通用户无需执行本节；这是维护者发布土豆片核心（eink fork）时的操作清单。
+普通用户无需执行本节。**上游更新只动 dist 仓库，本插件仓库零改动。**
 
-1. **在 eink fork 应用补丁并打 Release**：把本仓库的 `fork-patch/force-python.patch` 复制到你的 eink fork 仓库根目录，执行 `git apply force-python.patch`。补丁改动：`card.py` 顶部新增 `import os`；`_build_payload` 与 `_send_blocking` 两个 BLE 分支改为 `if sys.platform != "darwin" or os.environ.get("TODOOCARD_FORCE_PYTHON") == "1":`；新增自包含的 `_scan_python`（bleak）方法，并让 Web UI 扫描端点 `_scan` 在 macOS 纯 Python 模式下改走它；`_send_python` 的成功/失败两条返回路径补 `output` 键（共享 `send()` 无条件读 `res["output"]`，缺键会 KeyError `'output'`）；新增 `_pair_python` 引导方法，并让 `pair_session`/`_run_pair`/`_pair` 三处配对在纯 Python 模式下不再调用依赖无授权 Swift 的 `_ensure_bins`（改为提示到系统设置配对，避免 `build_sender.sh` exit 127）。`pick_folders` 文件夹选择器不受影响。**再应用 `fork-patch/localhost-bind.patch`**（`git apply localhost-bind.patch`）：把 `server.py` 的 Web UI 绑定从 `0.0.0.0` 改为默认 `127.0.0.1`（仅本机回环），并新增 `HOST` 环境变量（设 `HOST=0.0.0.0` 可恢复局域网访问，见下方「安全」）。两个补丁分别改 `card.py` 与 `server.py`，互不冲突、应用顺序不限。应用后建议 `python3 -m py_compile card.py server.py` 自检，然后打 tag 并发布 Release，产物作为 manifest 里的 `einkUrl` 包。
-2. **准备各平台便携 Python 包 + sha256**：为每个目标平台（`darwin-arm64`、`darwin-x64`、`windows-x64`、`linux-x64`）准备便携 Python 运行时包（`pythonUrl`）与 eink 源码包（`einkUrl`，可选依赖包 `depsUrl`），并分别计算 SHA-256。插件安装时会逐一校验，不匹配即拒绝安装。便携 Python 包解压后须直接得到 `python/bin/python3`（macOS/Linux）或 `python/python.exe`（Windows），不要多套一层目录；eink 包解压后须直接得到 `server.py`/`card.py`/`requirements.txt`（位于压缩包根）。Windows 的 Python 包用 `.zip`（插件用 `Expand-Archive` 解压），其余平台用 `.tar.gz`。
-3. **托管 manifest JSON**：把版本号与各平台包的 URL/sha256 写成 manifest JSON，托管到可公开访问的 HTTPS 地址（如 GitHub Pages 或 Release 附件）。格式与插件 `src/types.ts` 的 `Manifest` 一致，平台键为 `平台-架构`（Windows 用 `windows`）：
+1. **扩展包与 manifest 在独立仓库**：`Gt841/todoocard-core-dist`（本地路径 `../todoocard-core-dist`）。目录、脚本、锚点清单与上游更新工作流见其 [README](../todoocard-core-dist/README.md) 与 [docs/maintainer.md](../todoocard-core-dist/docs/maintainer.md)。
+2. **发布资产**：`bash scripts/build-extension.sh` 生成 `dist/extension-<ver>.zip`；`REFRESH=1 bash scripts/build-manifest.sh` 复算三资产 sha256 并生成 `manifest.json`；`bash scripts/verify.sh` 做无 BLE 端到端验证。
+3. **托管**：`manifest.json` → GitHub Pages（如 `https://gt841.github.io/todoocard-core-dist/manifest.json`）；扩展 zip → GitHub Release `v<ver>`。**源码 tarball 与便携 Python 只引用上游 URL，不托管、不再分发。**
+4. **版本钉死**：manifest 用 `coreCommit`（40 位 sha）拼 `sourceUrl`，用 `sourceSha256` 锁字节；`coreTag`（如 `v1.0.11-macos`）**仅作展示/追溯**——上游没有裸 `v1.0.11` tag。发布前务必 `REFRESH=1` 复算 sha（GitHub archive 字节可能随服务端重新生成而变化）。
+5. **插件设置**：`src/settings.ts` 的 `DEFAULT_SETTINGS.manifestUrl` 已默认指向上述 Pages 地址（`DIST_MANIFEST_URL`），**普通用户无需手填**；需要自建源时在思源「设置 → 集市 → 已下载 → 本插件」的 **Manifest URL** 覆盖（本地开发可用 `file://`）。控制台「安装/更新」是手动触发，比较 `core.json.coreVersion` 与 `manifest.coreVersion`；旧 `core.json` 缺该字段视为 `0.0.0`，会自动重装迁移到 v2。
 
-   ```json
-   {
-     "version": "1.0.0",
-     "platforms": {
-       "darwin-arm64": {
-         "pythonUrl": "https://example.com/python-darwin-arm64.tar.gz",
-         "pythonSha256": "<sha256>",
-         "einkUrl": "https://example.com/eink-1.0.0.zip",
-         "einkSha256": "<sha256>"
-       }
-     }
-   }
-   ```
-
-   每个平台条目至少要有 `pythonUrl`/`pythonSha256` 与 `einkUrl`/`einkSha256`（URL 与对应 SHA-256 均必填）；`depsUrl`/`depsSha256` 可选。`depsUrl`/`depsSha256` 为可选离线 wheels 包；缺省时插件回退在线 `pip install -r requirements.txt`。
-4. **在插件设置里填 manifest URL**：在思源「设置 → 集市 → 已下载 → 本插件」的设置项 **Manifest URL** 中填入托管地址（本地开发可用 `file://` 指向本地 manifest），之后控制台「安装/更新」即可检测、下载并校验核心。
-
-macOS 上插件启动核心时会自动设置 `TODOOCARD_FORCE_PYTHON=1`（纯 Python 模式），因此 fork 必须带上本补丁，macOS 的扫描/发送才会走 Python（bleak）路径。
+`fork-patch/*.patch` 与 `scripts/dev-kit.sh` 是 Phase 1 的旧 fork 分发工具，**已作废**（见 `fork-patch/README.md`），其有用逻辑已重基为 dist 仓库的 `apply.py`。
 
 ## 平台说明 / Platform notes
 
@@ -50,7 +52,7 @@ Windows/Linux：核心 Web UI 的「扫描附近设备」按钮依赖 macOS Swif
 
 ## 安全 / Security
 
-核心 Web UI（`card.html` 及 `/api/card/*`）**无鉴权**：能访问该端口的人都能向卡片发图、读取卡片状态。上游默认绑 `0.0.0.0`（所有网卡），本插件的 fork 补丁 `localhost-bind.patch` 已改为**默认仅绑 `127.0.0.1`**，因此只有本机能访问——思源内嵌的传图页签走的正是 `127.0.0.1`，功能不受影响。
+核心 Web UI（`card.html` 及 `/api/card/*`）**无鉴权**：能访问该端口的人都能向卡片发图、读取卡片状态。上游默认绑 `0.0.0.0`（所有网卡），`apply.py` 注入的改动已改为**默认仅绑 `127.0.0.1`**，因此只有本机能访问——思源内嵌的传图页签走的正是 `127.0.0.1`，功能不受影响。
 
 如需用手机/其他设备经局域网访问传图界面，在启动思源的环境里设 `HOST=0.0.0.0`（核心继承思源进程的环境变量）。**这会重新把无鉴权界面暴露到整个局域网**，请仅在可信网络下使用。macOS 从 Finder 启动的思源不继承 shell 环境，可用 `launchctl setenv HOST 0.0.0.0` 后重启思源。端口可在控制台「端口」修改（默认 8199）。
 
@@ -63,3 +65,5 @@ npm run build     # emits dist/ and package.zip
 npm run make-link # symlink dev build into your SiYuan plugins dir
 npm run dev       # watch build into the SiYuan plugins dir
 ```
+
+设计与实现计划见 `docs/superpowers/specs/2026-11-12-upstream-core-extension-design.md` 与 `docs/superpowers/plans/2026-11-12-upstream-core-extension.md`。

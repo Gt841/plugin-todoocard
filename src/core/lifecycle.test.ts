@@ -8,7 +8,7 @@ import { CoreStore } from "./store";
 function mk() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lc-"));
   const store = new CoreStore(dir);
-  store.writeCoreJson({ version: "1", installedAt: 1, source: { manifestUrl: "", pythonSha256: "", einkSha256: "" }, launchMode: null, platform: "darwin", arch: "arm64" });
+  store.writeCoreJson({ version: "2.0.0", coreVersion: "1.0.11", coreCommit: "3642b4b25e42e38776f3227db601474173f915b1", installedAt: 1, source: { manifestUrl: "", sourceSha256: "", pythonSha256: "", extensionSha256: "" }, launchMode: null, platform: "darwin", arch: "arm64" });
   const ctx: any = { python: "/py", serverPy: "/e/server.py", einkDir: "/e", coreDir: dir, port: 8199, platform: "darwin", pidFile: store.paths.pidFile, logFile: store.paths.logFile, probePy: "/probe.py", disclaimPy: "/dis.py", terminalTpl: "/tpl" };
   return { store, ctx, dir };
 }

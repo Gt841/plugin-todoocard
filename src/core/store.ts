@@ -50,3 +50,8 @@ export class CoreStore {
     this.writeCoreJson(cj);
   }
 }
+
+/** 旧 core.json（Phase 1）没有 coreVersion：视为 0.0.0，触发重装迁移到 v2。 */
+export function coreVersionOf(cj: CoreJson | null): string {
+  return cj?.coreVersion ?? "0.0.0";
+}

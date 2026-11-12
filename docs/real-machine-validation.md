@@ -1,5 +1,14 @@
 # 真机端到端验证清单（Phase 1）
 
+> **2026-11-12 更新**：分发模型已改为 v2（上游源码 tarball + 版本匹配扩展包）。
+> 本清单的**步骤 0–1（dev-kit 打补丁、本地 http 服务、旧版 manifest）已作废**，
+> 资产准备改走 `../todoocard-core-dist/scripts/{build-extension,build-manifest,verify}.sh`，
+> manifest 用 v2（`coreVersion` / `coreCommit` / 三资产）。
+> **步骤 2–7 的真机 BLE / 启动级联 / 退出清理检查仍然适用**，只是安装来源换成正式 manifest。
+> **dist 侧发布已于 2026-11-12 完成**（`Gt841/todoocard-core-dist` 仓库 / Release `v1.0.11` / Pages manifest），
+> 插件默认 `manifestUrl` 已指向 `https://gt841.github.io/todoocard-core-dist/manifest.json`。
+> 尚未完成：真机 BLE 验证、插件发版 / 思源集市 PR（仍需维护者授权）。
+
 本清单对应实现计划 Task 12 的步骤 1–7，供维护者在**真实硬件 + 真实思源**上验证插件。
 单元测试（57/57）已覆盖逻辑，但 **BLE 扫描/发送是 spec §13 标注的「待验证风险」**——纯 Python
 路径结构上已自包含，真机能否成功传图必须实测。发版（步骤 8）请在验证通过后再做。
@@ -140,8 +149,8 @@ ps aux | grep '[s]erver.py'    # 预期无输出（核心已关）
 2. **写 `CHANGELOG.md`**：记录 Phase 1 功能与已知限制。
 3. **补 `autoTag.js`**：`package.json` 的 `npm run tag` 引用了 `./autoTag.js`，**当前仓库还没有这个文件**——按维护者其他插件（博思白板/PPTGo/墨刀）的 autoTag.js 模板补上，再打 tag/Release。
 4. **构建产物**：`npm run build` 生成 `package.zip`。
-5. **托管核心 fork**：按 README「维护者托管」把双补丁应用到你的 eink fork、打 Release、准备各平台便携 Python + manifest，托管到公开 HTTPS。
-6. **发布**：打 tag / GitHub Release / 思源集市 PR（**工作树外副作用，需你确认后执行**）。
+5. **核心资产托管**：**已完成**（2026-11-12）——`Gt841/todoocard-core-dist` 的 Release `v1.0.11`（`extension-1.0.11.zip`）与 Pages（v2 `manifest.json`）；上游源码 tarball 按 commit sha 钉死、便携 Python 引用 astral-sh 官方包，均不由我们托管。上游发新版时只改 dist 仓库并 push manifest，插件仓库不动。
+6. **发布**：打 tag / GitHub Release / 思源集市 PR（**工作树外副作用，需你确认后执行**）。当前插件仓库**没有 git remote**，且 `Gt841/plugin-todoocard` 尚未创建，推送前需先建远端。
 
 > 安全默认：核心 Web UI 无鉴权，fork 已默认只绑 `127.0.0.1`。要局域网/手机访问设 `HOST=0.0.0.0`（见 README「安全」），仅在可信网络下使用。
 

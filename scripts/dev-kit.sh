@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# DEPRECATED (2026-11-12): Phase 1 的 fork 分发验证工具，已作废。
+# 分发模型改为「上游源码 tarball + 版本匹配扩展包」，请改用：
+#   ../todoocard-core-dist/scripts/build-extension.sh
+#   ../todoocard-core-dist/scripts/build-manifest.sh
+#   ../todoocard-core-dist/scripts/verify.sh
+# 本脚本仅保留作历史回溯；它仍会 clone 旧 base b0f2673 并打废弃补丁。
+#
 # Build a LOCAL dev kit for real-machine validation of plugin-todoocard.
 #
 # Produces in $DEV_DIR (default /tmp/todoocard-dev):

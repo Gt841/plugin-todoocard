@@ -3,7 +3,7 @@ import ControlPanel from "./ui/ControlPanel.svelte";
 import TodooWebview from "./ui/TodooWebview.svelte";
 import { DEFAULT_SETTINGS, normalizeLaunch } from "./settings";
 import type { Settings } from "./types";
-import { CoreStore, defaultCoreDir } from "./core/store";
+import { CoreStore, defaultCoreDir, coreVersionOf } from "./core/store";
 import { CoreLifecycle } from "./core/lifecycle";
 import { installCore, httpGetText } from "./core/installer";
 import { parseManifest, selectPlatform, platformKey, compareVersion } from "./core/manifest";
@@ -157,8 +157,15 @@ export default class TodoocardPlugin extends Plugin {
       const key = platformKey(process.platform, process.arch);
       const entry = selectPlatform(m, key);
       const cur = this.store.readCoreJson();
-      if (cur && compareVersion(cur.version, m.version) >= 0) { this.log("已是最新版本"); return; }
-      await installCore({ store: this.store, entry, version: m.version, manifestUrl: this.settings.manifestUrl, platform: process.platform, arch: process.arch, onProgress: (s) => this.log(s) });
+      // 旧 core.json 无 coreVersion → 视为 0.0.0 → 必更新，安装成功后写入 v2。
+      if (cur && compareVersion(coreVersionOf(cur), m.coreVersion) >= 0) { this.log("已是最新版本"); return; }
+      await installCore({
+        store: this.store, entry, version: m.version,
+        coreVersion: m.coreVersion, coreCommit: m.coreCommit,
+        manifestUrl: this.settings.manifestUrl,
+        platform: process.platform, arch: process.arch,
+        onProgress: (s) => this.log(s),
+      });
       this.refresh();
     } catch (e) { this.log("安装失败: " + e); showMessage("安装失败，详见日志", 5000, "error"); }
   }
