@@ -1,0 +1,23 @@
+diff --git a/server.py b/server.py
+index e3f0d5d..b8403e8 100644
+--- a/server.py
++++ b/server.py
+@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parent
+ WEB_DIR = ROOT / "web"
+ DATA_DIR = ROOT / "data"
+ PORT = int(os.environ.get("PORT", "8199"))
++# 默认仅绑定本机回环：Web UI 无鉴权，绑 0.0.0.0 会让局域网内任何人发图/读卡。
++# 需要手机/局域网访问时显式设 HOST=0.0.0.0（自行评估网络环境）。
++HOST = os.environ.get("HOST", "127.0.0.1")
+ 
+ _LOGGER = logging.getLogger("todoocard")
+ 
+@@ -54,7 +57,7 @@ async def main():
+     app = build_app(svc)
+     runner = web.AppRunner(app)
+     await runner.setup()
+-    site = web.TCPSite(runner, "0.0.0.0", PORT)
++    site = web.TCPSite(runner, HOST, PORT)
+     await site.start()
+     _LOGGER.info("土豆片服务已启动： http://127.0.0.1:%s/card.html", PORT)
+     try:
