@@ -26,7 +26,9 @@ Supported: Windows, Linux, macOS (desktop frontends only, SiYuan ≥ 3.0.1).
 
 `apply.py` 用**锚点断言 + 幂等 + 编译校验**守住版本匹配：上游源码漂移（锚点消失/变形/多处）或 `coreVersion`/`coreCommit` 不符 → 非 0 退出，控制台提示「上游版本可能已漂移」，维护者重基扩展包。
 
-> 当前状态（2026-11-12）：**dist 已上线**——仓库 `Gt841/todoocard-core-dist`、Release `v1.0.11`、Pages manifest 均已发布，插件默认 `manifestUrl` 已指向 `https://gt841.github.io/todoocard-core-dist/manifest.json`（可在设置里覆盖）。线上三资产 sha 与全链路（含 pip、apply.py、py_compile）已复核通过。**仍待人工**：真机 BLE 全流程验证、插件集市发版。
+> 当前状态（2026-11-12）：**dist 已上线**——仓库 `Gt841/todoocard-core-dist`、Release `v1.0.11`、Pages manifest 均已发布，插件默认 `manifestUrl` 已指向 `https://gt841.github.io/todoocard-core-dist/manifest.json`（可在设置里覆盖）。线上三资产 sha 与全链路（含 pip、apply.py、py_compile）已复核通过。
+>
+> **hotfix（manifest `2.0.1`）**：首次真机发送暴露 macOS CoreBluetooth 带响应写会永久挂起，已由 dist 的 `hotfixes/v1.0.11.json` 加 8s 超时修复。**已装过核心的用户必须点控制台「强制重装」**（`coreVersion` 仍是 `1.0.11`，按版本比较不会自动触发）。**仍待人工**：真机 BLE 全流程验证、插件集市发版。
 
 ## macOS pairing note
 

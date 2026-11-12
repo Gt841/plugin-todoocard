@@ -258,4 +258,14 @@ plugin-todoocard/                      ← 改造 5 个模块 + 测试
 | 线上三资产验收 | 按线上 manifest 的 URL 下载 source / python / extension，三项 sha 全匹配；用该资产跑 `verify.sh` 全链路 PASS |
 | 插件默认 manifestUrl | `src/settings.ts` 已指向 `DIST_MANIFEST_URL`，`settings.test.ts` 加回归断言 |
 
-**未完成（需人工）**：真机 BLE 全流程验证；插件 tag / Release / 思源集市 PR。插件仓库当前无 git remote，`Gt841/plugin-todoocard` 尚未创建，故仅做本地提交、未推送。
+### 首次真机 hotfix（同日 18:40 后）
+
+用户在本机真机发送时卡死：日志停在 `[sender] 请求 block size`，`/api/card.busy` 永久为 true。
+根因是 macOS CoreBluetooth 的带响应写在设备不回 ATT 时永久挂起，且 `sender.py` 无超时。
+修复落在 dist 的 `extension/hotfixes/v1.0.11.json`（6 条）：所有 BLE await 套 `WRITE_TIMEOUT=8s`，
+并修占位卡 `R.FS["title"]`。`apply.py` 按 `v<coreVersion>.json` + `targetCoreCommit` 双重门控，
+**其他版本一律不注入**；测试 7→11 例、`verify.sh` 断言 8→13 条，manifest 升到 `2.0.1`，
+Release `v1.0.11` 同名资产覆盖上传。因 `coreVersion` 未变，已装用户必须点「强制重装」。
+详见 `docs/real-machine-validation.md` 的「首次真机故障记录」。
+
+**未完成（需人工）**：真机 BLE 全流程验证（卡片是否真的刷出图像）；插件 tag / Release / 思源集市 PR。插件仓库当前无 git remote，`Gt841/plugin-todoocard` 尚未创建，故仅做本地提交、未推送。
