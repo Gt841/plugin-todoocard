@@ -5,7 +5,7 @@ import { DEFAULT_SETTINGS, normalizeLaunch } from "./settings";
 import type { Settings } from "./types";
 import { CoreStore, defaultCoreDir } from "./core/store";
 import { CoreLifecycle } from "./core/lifecycle";
-import { installCore } from "./core/installer";
+import { installCore, httpGetText } from "./core/installer";
 import { parseManifest, selectPlatform, platformKey, compareVersion } from "./core/manifest";
 import { pythonExe, type LaunchCtx } from "./core/launcher";
 import fs from "fs";
@@ -24,13 +24,19 @@ export default class TodoocardPlugin extends Plugin {
   private logText = "";
   private running = false;
   private currentMode = "";
+  private ipc: any = null;
+  private onBeforeUnload = () => { this.lifecycle?.stop(); };
+  private onIpcExit = () => { this.lifecycle?.stop(); };
 
   async onload() {
     this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData(STORAGE_NAME)) };
     this.settings.launch = normalizeLaunch(this.settings.launch);
     this.rebuild();
     this.setting = new Setting({
-      confirmCallback: () => { this.saveData(STORAGE_NAME, this.settings); this.rebuild(); this.refresh(); },
+      confirmCallback: () => {
+        this.saveData(STORAGE_NAME, this.settings).catch((e) => { this.log("保存设置失败: " + e); showMessage("保存设置失败，详见日志", 5000, "error"); });
+        this.rebuild(); this.refresh();
+      },
     });
     this.setting.addItem({
       title: "Manifest URL",
@@ -59,9 +65,9 @@ export default class TodoocardPlugin extends Plugin {
       icon: `<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14.88 16.29L13 18.17v-3.76l1.88 1.88M13 5.83l1.88 1.88L13 9.59V5.83m4.71 1.88L12 2h-1v7.59L6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 11 14.41V22h1l5.71-5.71-4.3-4.29 4.3-4.29z"/></svg>`,
       title: "土豆片", position: "right", callback: () => this.openPanel(),
     });
-    const ipc = window.require?.("electron")?.ipcRenderer;
-    if (ipc) this.lifecycle.installExitHook(ipc);
-    window.addEventListener("beforeunload", () => this.lifecycle.stop());
+    this.ipc = window.require?.("electron")?.ipcRenderer ?? null;
+    if (this.ipc) this.ipc.on("siyuan-save-close", this.onIpcExit);
+    window.addEventListener("beforeunload", this.onBeforeUnload);
     const stale = this.lifecycle.detectStale();
     if (stale) showMessage(`检测到残留土豆片核心进程 (PID ${stale})，可在控制台停止或接管`, 6000, "info");
   }
@@ -93,7 +99,7 @@ export default class TodoocardPlugin extends Plugin {
     this.panel.$on("install", () => this.doInstall());
     this.panel.$on("start", () => this.doStart());
     this.panel.$on("stop", () => this.doStop());
-    this.panel.$on("recheck", () => { this.store.setCachedMode(null as any); this.log("已清除模式缓存，下次启动重新预检"); });
+    this.panel.$on("recheck", () => { this.store.setCachedMode(null); this.log("已清除模式缓存，下次启动重新预检"); });
     this.panel.$on("openweb", () => this.openWeb());
     this.panel.$on("opendir", async () => {
       try {
@@ -117,15 +123,30 @@ export default class TodoocardPlugin extends Plugin {
       } catch (e) { this.log("更改目录失败: " + e); showMessage(String(e), 5000, "error"); }
     });
     this.panel.$on("launch", (e: CustomEvent) => this.saveLaunch(e.detail));
+    this.panel.$on("port", (e: CustomEvent) => this.savePort(e.detail));
     this.refresh();
   }
 
   private panelProps() {
-    return { status: this.store.detect(), running: this.running, mode: this.currentMode, launch: this.settings.launch, coreDir: this.store.coreDir, log: this.logText, isDarwin: process.platform === "darwin" };
+    return { status: this.store.detect(), running: this.running, mode: this.currentMode, launch: this.settings.launch, port: this.settings.port, coreDir: this.store.coreDir, log: this.logText, isDarwin: process.platform === "darwin" };
   }
   private refresh() { this.panel?.$set(this.panelProps()); }
 
-  private async saveLaunch(v: string) { this.settings.launch = normalizeLaunch(v); await this.saveData(STORAGE_NAME, this.settings); this.rebuild(); this.refresh(); }
+  private async saveLaunch(v: string) {
+    this.settings.launch = normalizeLaunch(v);
+    try { await this.saveData(STORAGE_NAME, this.settings); }
+    catch (e) { this.log("保存启动方式失败: " + e); showMessage("保存设置失败，详见日志", 5000, "error"); }
+    this.rebuild(); this.refresh();
+  }
+
+  private async savePort(v: number) {
+    const port = Number.isFinite(v) && v >= 1 && v <= 65535 ? Math.floor(v) : 8199;
+    this.settings.port = port;
+    try { await this.saveData(STORAGE_NAME, this.settings); }
+    catch (e) { this.log("保存端口失败: " + e); showMessage("保存设置失败，详见日志", 5000, "error"); }
+    this.rebuild(); this.refresh();
+    this.log("核心端口已设为 " + port + "（重启核心后生效）");
+  }
 
   private async doInstall() {
     try {
@@ -144,7 +165,7 @@ export default class TodoocardPlugin extends Plugin {
 
   private async fetchText(url: string): Promise<string> {
     if (url.startsWith("file://")) return fs.readFileSync(url.slice(7), "utf8");
-    const res = await fetch(url); return res.text();
+    return httpGetText(url);
   }
 
   private async doStart() {
@@ -164,5 +185,10 @@ export default class TodoocardPlugin extends Plugin {
     openTab({ app: this.app, custom: { id: this.name + "todoocard-web", title: "土豆片传图", icon: "iconImage", data: { url } } });
   }
 
-  onunload() { this.lifecycle?.stop(); this.panel?.$destroy(); this.dialog?.destroy(); }
+  onunload() {
+    this.lifecycle?.stop();
+    window.removeEventListener("beforeunload", this.onBeforeUnload);
+    if (this.ipc) this.ipc.removeListener("siyuan-save-close", this.onIpcExit);
+    this.panel?.$destroy(); this.dialog?.destroy();
+  }
 }

@@ -1,18 +1,19 @@
 import fs from "fs";
 import path from "path";
 import type { CoreJson, CoreStatus, LaunchMode } from "../types";
+import { pythonExe } from "./launcher";
 
 export function defaultCoreDir(dataDir: string): string {
   return path.join(dataDir, "todoocard-core");
 }
 
 export class CoreStore {
-  constructor(public readonly coreDir: string) {}
+  constructor(public readonly coreDir: string, private platform: string = process.platform) {}
 
   get paths() {
     const runDir = path.join(this.coreDir, "run");
     return {
-      python: path.join(this.coreDir, "python", "bin", "python3"),
+      python: pythonExe(this.coreDir, this.platform),
       eink: path.join(this.coreDir, "eink"),
       serverPy: path.join(this.coreDir, "eink", "server.py"),
       coreJson: path.join(this.coreDir, "core.json"),
@@ -42,7 +43,7 @@ export class CoreStore {
 
   getCachedMode(): LaunchMode | null { return this.readCoreJson()?.launchMode ?? null; }
 
-  setCachedMode(m: LaunchMode): void {
+  setCachedMode(m: LaunchMode | null): void {
     const cj = this.readCoreJson();
     if (!cj) return;
     cj.launchMode = m;

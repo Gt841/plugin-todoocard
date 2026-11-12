@@ -43,3 +43,32 @@ describe("CoreStore cached mode", () => {
     expect(new CoreStore(dir).readCoreJson()).toBeNull();
   });
 });
+
+describe("detect platform-aware python path", () => {
+  function mkStore(platform: string) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "store-"));
+    const s = new CoreStore(dir, platform);
+    fs.mkdirSync(path.join(dir, "eink"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "eink", "server.py"), "");
+    s.writeCoreJson({ version: "1.0.0", installedAt: 0, source: { manifestUrl: "", pythonSha256: "", einkSha256: "" }, launchMode: null, platform, arch: "x64" });
+    return { dir, s };
+  }
+  it("win32: installed when python/python.exe exists", () => {
+    const { dir, s } = mkStore("win32");
+    fs.mkdirSync(path.join(dir, "python"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "python", "python.exe"), "");
+    expect(s.detect()).toBe("installed");
+  });
+  it("win32: not-installed when only posix layout exists", () => {
+    const { dir, s } = mkStore("win32");
+    fs.mkdirSync(path.join(dir, "python", "bin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "python", "bin", "python3"), "");
+    expect(s.detect()).toBe("not-installed");
+  });
+  it("darwin: installed when python/bin/python3 exists", () => {
+    const { dir, s } = mkStore("darwin");
+    fs.mkdirSync(path.join(dir, "python", "bin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "python", "bin", "python3"), "");
+    expect(s.detect()).toBe("installed");
+  });
+});

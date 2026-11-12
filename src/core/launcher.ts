@@ -50,15 +50,19 @@ export async function launchCore(mode: LaunchMode, ctx: LaunchCtx): Promise<{ pi
   const env = buildCoreEnv(ctx.platform, process.env as Record<string, string>);
   env.PORT = String(ctx.port); // server.py reads PORT from env (no --port flag); covers direct & disclaim, terminal gets it via template
   if (mode === "direct") {
-    const child = spawn(ctx.python, [ctx.serverPy], { cwd: ctx.einkDir, env, detached: process.platform !== "win32", stdio: ["ignore", fs.openSync(ctx.logFile, "a"), fs.openSync(ctx.logFile, "a")] });
-    child.on("error", () => {}); // swallow async spawn error so a missing python cannot crash the host (mirrors runSpawn/killTree)
+    const logFd = fs.openSync(ctx.logFile, "a");
+    const child = spawn(ctx.python, [ctx.serverPy], { cwd: ctx.einkDir, env, detached: process.platform !== "win32", stdio: ["ignore", logFd, logFd] });
+    fs.closeSync(logFd);
+    child.on("error", () => {}); // swallow async spawn error so a missing python cannot crash the host
     child.unref();
     if (child.pid === undefined) throw new Error("core spawn failed: python executable not found or not spawnable");
     writePid(ctx.pidFile, child.pid);
     return { pid: child.pid };
   }
   if (mode === "disclaim") {
-    const child = spawn(ctx.python, [ctx.disclaimPy, ctx.python, ctx.serverPy], { cwd: ctx.einkDir, env, stdio: ["ignore", "pipe", fs.openSync(ctx.logFile, "a")] });
+    const logFd = fs.openSync(ctx.logFile, "a");
+    const child = spawn(ctx.python, [ctx.disclaimPy, ctx.python, ctx.serverPy], { cwd: ctx.einkDir, env, stdio: ["ignore", "pipe", logFd] });
+    fs.closeSync(logFd);
     const pid = await new Promise<number>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error("disclaim PID timeout")), 15000);
       child.stdout!.on("data", (d) => {

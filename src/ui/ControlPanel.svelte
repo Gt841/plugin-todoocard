@@ -4,10 +4,12 @@
   export let running: boolean = false;
   export let mode: string = "";
   export let launch: string = "auto";
+  export let port: number = 8199;
   export let coreDir: string = "";
   export let log: string = "";
   export let isDarwin: boolean = true;
   const dispatch = createEventDispatcher();
+  const onPortChange = (e: Event) => dispatch("port", parseInt((e.currentTarget as HTMLInputElement).value, 10));
 </script>
 
 <div class="tc-panel">
@@ -28,6 +30,12 @@
       {#if isDarwin}<option value="terminal">仅 ④ Terminal</option>{/if}
     </select>
   </div>
+  <div class="tc-row">端口：
+    <input class="b3-text-field" type="number" min="1" max="65535" style="width:90px"
+      value={port}
+      on:change={onPortChange} />
+    <span class="tc-hint">核心 Web UI 端口（默认 8199；被占用时可改）</span>
+  </div>
   <div class="tc-row">核心目录：<code>{coreDir}</code>
     <button class="b3-button b3-button--text" on:click={() => dispatch("opendir")}>打开</button>
     <button class="b3-button b3-button--text" on:click={() => dispatch("changedir")}>更改</button>
@@ -39,4 +47,5 @@
   .tc-panel { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
   .tc-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; }
   .tc-log { max-height: 220px; overflow: auto; background: var(--b3-theme-background); border: 1px solid var(--b3-border-color); border-radius: 4px; padding: 8px; font-size: 12px; white-space: pre-wrap; }
+  .tc-hint { color: var(--b3-theme-on-surface); opacity: 0.6; font-size: 12px; }
 </style>
