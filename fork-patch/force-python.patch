@@ -1,0 +1,30 @@
+diff --git a/card.py b/card.py
+index 2733f51..9088adc 100644
+--- a/card.py
++++ b/card.py
+@@ -15,6 +15,7 @@ from __future__ import annotations
+ import asyncio
+ import json
+ import logging
++import os
+ import random
+ import shutil
+ import sqlite3
+@@ -1218,7 +1219,7 @@ class CardService:
+         return sender, conv
+ 
+     def _build_payload(self, image_path: Path) -> dict:
+-        if sys.platform != "darwin":
++        if sys.platform != "darwin" or os.environ.get("TODOOCARD_FORCE_PYTHON") == "1":
+             return self._build_payload_python(image_path)
+         sender, conv = self._ensure_bins()
+         work = self.cards_dir / "work"
+@@ -1271,7 +1272,7 @@ class CardService:
+         return False
+ 
+     def _send_blocking(self, image_path: Path, wait_sec: float | None = None) -> dict:
+-        if sys.platform != "darwin":
++        if sys.platform != "darwin" or os.environ.get("TODOOCARD_FORCE_PYTHON") == "1":
+             return self._send_python(image_path, wait_sec)
+         return self._send_macos(image_path, wait_sec)
+ 
