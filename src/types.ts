@@ -82,7 +82,7 @@ export interface PrereqView {
   errors: string[];
 }
 
-export type JobKind = "install" | "scan" | "pair" | "probe" | "prepare" | "send";
+export type JobKind = "install" | "scan" | "pair" | "probe" | "bing" | "prepare" | "send";
 
 export interface JobView {
   kind: JobKind | null;
@@ -101,6 +101,8 @@ export interface ImageView {
   dataUrl: string;
 }
 
+export type PreparedInputKind = "original" | "crop" | "layout";
+
 export interface PreparedView {
   binBase64: string;
   width: number;
@@ -110,9 +112,11 @@ export interface PreparedView {
   qlzBytes: number;
   at: number;
   inputName: string;
-  /** 这份 payload 是否由 2:3 取景裁剪图生成（而非原图）。 */
-  usedCrop: boolean;
+  /** 这份 payload 的输入来源：原图、2:3 取景裁剪图，或排版卡片。 */
+  inputKind: PreparedInputKind;
 }
+
+export type ImageMode = "direct" | "layout";
 
 export interface PanelView {
   stateDir: string;
@@ -131,6 +135,14 @@ export interface PanelView {
   scan: { running: boolean; secondsLeft: number };
   job: JobView;
   image: ImageView | null;
+  /** 排版用的图片列表；直接发送时通常只有一张。 */
+  images: ImageView[];
+  /** 图片页当前模式；关闭面板再打开时保持一致。 */
+  imageMode: ImageMode;
+  /** 卡片版式；只有照片墙使用多图，关闭面板再打开时保持一致。 */
+  cardLayout: "immersive" | "framed" | "wall";
+  /** 下一次 Bing 壁纸的位置（0–7）；大于 0 时按钮显示「换一张壁纸」。 */
+  bingIndex: number;
   prepared: PreparedView | null;
   log: string[];
   settings: Settings;

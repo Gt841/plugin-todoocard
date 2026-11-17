@@ -7,6 +7,8 @@ import { SkillRunner } from "./runner";
 import { classifyOutcome, parsePreparedPaths, parseScanLine, isUuid, type JobOutcome } from "./parse";
 import { normalizeSendTargets, summarizeBatch, type SendTargetResult } from "./batch";
 import { cleanupTempImages, isImageFile, previewDataUrl, readImageMeta, saveDroppedImage, savePastedPng, validateImageMeta } from "./image";
+import { BING_MAX_INDEX, fetchBingWallpaper } from "./bing";
+import { MAX_CARD_IMAGES, type CardLayout } from "./layout";
 import { statePaths } from "./paths";
 import {
   PANEL_HEIGHT,
@@ -14,9 +16,11 @@ import {
   type DeviceInfo,
   type DeviceRow,
   type Filters,
+  type ImageMode,
   type ImageView,
   type JobKind,
   type PanelView,
+  type PreparedInputKind,
   type PreparedView,
   type PrereqView,
   type SkillView,
@@ -55,9 +59,14 @@ export class TodooService {
   selectedId: string | null = null;
   filters: Filters = { q: "", onlyCompatible: true, onlyPairing: false, onlyPaired: false, sort: "rssi" };
   image: ImageView | null = null;
+  images: ImageView[] = [];
+  imageMode: ImageMode = "direct";
+  /** 排版版式；关闭面板再打开会恢复，照片墙决定粘贴/拖入是追加还是替换。 */
+  cardLayout: CardLayout = "immersive";
+  /** 下一次获取 Bing 壁纸使用的归档位置，重复点击时在最近 8 天之间切换。 */
+  bingIndex = 0;
   prepared: PreparedView | null = null;
   private preparedSource: string | null = null;
-  private preparedUsedCrop = false;
   job: { kind: JobKind | null; running: boolean; message: string; startedAt: number; canCancel: boolean } =
     { kind: null, running: false, message: "", startedAt: 0, canCancel: false };
   scan = { startedAt: 0, secondsLeft: 0 };
@@ -220,6 +229,10 @@ export class TodooService {
       scan: { running: this.job.kind === "scan" && this.job.running, secondsLeft: this.scan.secondsLeft },
       job: { ...this.job },
       image: this.image,
+      images: this.images,
+      imageMode: this.imageMode,
+      cardLayout: this.cardLayout,
+      bingIndex: this.bingIndex,
       prepared: this.prepared,
       log: this.logs.slice(-300),
       settings: { ...this.store.settings },
@@ -532,44 +545,169 @@ export class TodooService {
 
   // ── 图片 ─────────────────────────────────────────────────────
 
-  async setImage(file: string): Promise<void> {
-    try {
-      if (!isImageFile(file)) throw new Error("请选择 JPG/PNG/HEIC 等图片文件");
-      if (!fs.existsSync(file)) throw new Error("图片不存在或已被移动");
-      const meta = await readImageMeta(file);
-      validateImageMeta(meta);
-      const dataUrl = await previewDataUrl(file, statePaths(this.stateDir).cacheDir);
-      this.image = {
-        path: file,
-        name: path.basename(file),
-        width: meta.width,
-        height: meta.height,
-        bytes: meta.bytes,
-        dataUrl,
-      };
-      this.clearPreparedState();
-      this.log(`已选择图片：${path.basename(file)}（${meta.width}×${meta.height}）`);
-      this.push();
-    } catch (e) {
-      this.notify(String(e instanceof Error ? e.message : e), "error");
-    }
+  private async readImageView(file: string): Promise<ImageView> {
+    if (!isImageFile(file)) throw new Error("请选择 JPG/PNG/HEIC 等图片文件");
+    if (!fs.existsSync(file)) throw new Error("图片不存在或已被移动");
+    const meta = await readImageMeta(file);
+    validateImageMeta(meta);
+    const dataUrl = await previewDataUrl(file, statePaths(this.stateDir).cacheDir);
+    return {
+      path: file,
+      name: path.basename(file),
+      width: meta.width,
+      height: meta.height,
+      bytes: meta.bytes,
+      dataUrl,
+    };
   }
 
-  async setPastedPng(png: Buffer): Promise<void> {
+  /** 直接发送使用单图：替换当前图片列表。 */
+  async setImage(file: string): Promise<void> {
+    await this.addImages([file], { replace: true });
+  }
+
+  /**
+   * 排版图片列表。单图版式只取第一张，照片墙最多 6 张；重复路径不会重复加入。
+   * 读取失败的单张会被跳过，不影响其它已成功的图片。
+   */
+  async addImages(files: string[], opts: { replace?: boolean } = {}): Promise<number> {
+    const unique = [...new Set(files.filter((file) => typeof file === "string" && file.trim()))];
+    if (!unique.length) return 0;
+    const selected = unique.slice(0, MAX_CARD_IMAGES);
+    const loaded: ImageView[] = [];
+    const errors: string[] = [];
+    for (const file of selected) {
+      try {
+        loaded.push(await this.readImageView(file));
+      } catch (e) {
+        errors.push(`${path.basename(file)}：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (!loaded.length) {
+      const message = errors[0] || "没有可用的图片";
+      this.log(`图片读取失败：${message}`);
+      this.notify(message, "error");
+      this.push();
+      return 0;
+    }
+
+    const base = opts.replace ? [] : this.images;
+    const seen = new Set(base.map((item) => item.path));
+    const merged = [...base];
+    for (const item of loaded) {
+      if (seen.has(item.path)) continue;
+      merged.push(item);
+      seen.add(item.path);
+    }
+    const overflow = merged.length > MAX_CARD_IMAGES;
+    const beforeCount = base.length;
+    this.images = merged.slice(0, MAX_CARD_IMAGES);
+    this.image = this.images[0] || null;
+    const addedCount = this.images.length - beforeCount;
+    this.clearPreparedState();
+    if (opts.replace) {
+      const first = this.images[0];
+      if (first) this.log(`已选择图片：${first.name}（${first.width}×${first.height}）`);
+    } else {
+      this.log(`已添加 ${loaded.length} 张图片，共 ${this.images.length} 张`);
+    }
+    if (errors.length) {
+      this.log(`跳过图片：${errors.join("；")}`);
+      this.notify(errors[0], "error");
+    }
+    if (overflow) this.notify(`照片墙最多 ${MAX_CARD_IMAGES} 张，多出的图片未加入`, "info");
+    this.push();
+    return addedCount;
+  }
+
+  async setPastedPng(png: Buffer, append = false): Promise<void> {
     if (!png.length) { this.notify("剪贴板里没有图片", "error"); return; }
     const file = savePastedPng(png);
+    if (append) {
+      const added = await this.addImages([file]);
+      if (added) this.log("已从剪贴板粘贴截图");
+      return;
+    }
     await this.setImage(file);
     if (this.image) this.log("已从剪贴板粘贴截图");
   }
 
-  async setDroppedImage(bytes: Buffer, name: string): Promise<void> {
+  async setDroppedImage(bytes: Buffer, name: string, append = false): Promise<void> {
     if (!bytes.length) { this.notify("拖入的文件为空", "error"); return; }
     const file = saveDroppedImage(bytes, name || "image.png");
-    await this.setImage(file);
+    if (append) await this.addImages([file]);
+    else await this.setImage(file);
+  }
+
+  async addDroppedImages(files: { bytes: Buffer; name: string }[], append = true): Promise<void> {
+    const paths: string[] = [];
+    for (const file of files) {
+      if (!file.bytes?.length) continue;
+      paths.push(saveDroppedImage(file.bytes, file.name || "image.png"));
+    }
+    if (!paths.length) { this.notify("拖入的文件为空", "error"); return; }
+    if (append) await this.addImages(paths);
+    else await this.setImage(paths[0]);
+  }
+
+  removeImage(file: string): void {
+    const next = this.images.filter((item) => item.path !== file);
+    if (next.length === this.images.length) return;
+    this.images = next;
+    this.image = next[0] || null;
+    this.clearPreparedState();
+    this.log(`已移除图片，剩余 ${next.length} 张`);
+    this.push();
+  }
+
+  moveImage(file: string, delta: number): void {
+    const index = this.images.findIndex((item) => item.path === file);
+    const target = index + delta;
+    if (index < 0 || target < 0 || target >= this.images.length || !delta) return;
+    const next = [...this.images];
+    const [item] = next.splice(index, 1);
+    next.splice(target, 0, item);
+    this.images = next;
+    this.image = next[0] || null;
+    this.clearPreparedState();
+    this.push();
+  }
+
+  async loadBingWallpaper(append = true): Promise<void> {
+    if (this.job.running) { this.notify("有操作进行中，请稍后再试", "info"); return; }
+    if (append && this.images.length >= MAX_CARD_IMAGES) {
+      this.notify(`照片墙最多 ${MAX_CARD_IMAGES} 张，请先移除一张`, "info");
+      return;
+    }
+    this.job = { kind: "bing", running: true, message: "正在获取 Bing 每日壁纸…", startedAt: Date.now(), canCancel: false };
+    this.log("── 获取 Bing 每日壁纸 ──");
+    this.push();
+    try {
+      const index = this.bingIndex;
+      const result = await fetchBingWallpaper({ cacheDir: this.store.paths.cacheDir, index });
+      const added = await this.addImages([result.path], { replace: !append });
+      if (added) {
+        const credit = result.meta.copyright ? ` · ${result.meta.copyright}` : "";
+        this.log(`Bing 壁纸：${result.meta.title}${credit}${result.stale ? "（本地缓存）" : ""}`);
+        this.notify(result.stale ? "网络不可用，已使用本地缓存的 Bing 壁纸" : "已获取 Bing 每日壁纸", "info");
+      } else {
+        this.notify("这张 Bing 壁纸已在图片列表中", "info");
+      }
+      // 每次成功获取后换到下一张，重复点击即可切换最近 8 天的壁纸。
+      this.bingIndex = (index + 1) % (BING_MAX_INDEX + 1);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      this.log(`Bing 壁纸失败：${message}`);
+      this.notify(message, "error");
+    } finally {
+      this.job = { kind: null, running: false, message: "", startedAt: 0, canCancel: false };
+      this.push();
+    }
   }
 
   clearImage(): void {
     this.image = null;
+    this.images = [];
     this.clearPreparedState();
     this.push();
   }
@@ -578,6 +716,21 @@ export class TodooService {
     this.store.updateSettings({ rotateRight90: value });
     this.clearPreparedState();
     this.push();
+  }
+
+  /** 图片页模式由面板驱动；主进程需要靠它决定粘贴/拖入是替换还是追加。 */
+  setImageMode(mode: ImageMode): void {
+    this.imageMode = mode;
+  }
+
+  /** 只有照片墙追加图片，其它版式始终单图替换。 */
+  get cardWall(): boolean {
+    return this.cardLayout === "wall";
+  }
+
+  /** 版式由面板驱动；面板重建时按它恢复当前排版。 */
+  setCardLayout(layout: CardLayout): void {
+    this.cardLayout = layout;
   }
 
   /** 裁剪构图变化后，旧的 payload 已经不再对应当前画面。 */
@@ -589,30 +742,41 @@ export class TodooService {
   private clearPreparedState(): void {
     this.prepared = null;
     this.preparedSource = null;
-    this.preparedUsedCrop = false;
   }
 
   // ── 生成 / 发送 ──────────────────────────────────────────────
 
-  async prepare(croppedPng: Buffer | null = null, croppedName = "crop.png"): Promise<void> {
+  async prepare(
+    croppedPng: Buffer | null = null,
+    croppedName = "crop.png",
+    kind: "crop" | "layout" = "crop",
+  ): Promise<void> {
     if (!this.image) { this.notify("请先选择或粘贴一张图片", "error"); return; }
+    if (kind === "layout" && !croppedPng?.length) {
+      this.notify("排版卡片尚未生成", "error");
+      return;
+    }
     const runner = this.begin("prepare", "正在转换六色 payload 并校验…");
     if (!runner) return;
     let inputPath = this.image.path;
-    let usedCrop = false;
+    const inputKind: PreparedInputKind = croppedPng?.length ? kind : "original";
+    const inputName = croppedPng?.length ? (croppedName || "crop.png") : this.image.name;
     if (croppedPng?.length) {
       try {
         inputPath = saveDroppedImage(croppedPng, croppedName || "crop.png");
-        usedCrop = true;
       } catch (e) {
-        this.finish({ ok: false, summary: "预览失败", error: `无法保存裁剪图：${String(e)}` });
+        this.finish({
+          ok: false,
+          summary: "预览失败",
+          error: `无法保存${kind === "layout" ? "卡片图" : "裁剪图"}：${String(e)}`,
+        });
         return;
       }
     }
     this.clearPreparedState();
     const args = ["--input", inputPath];
-    // 裁剪图里的旋转已经烘焙进像素，不能再让上游转一次。
-    if (!usedCrop && this.store.settings.rotateRight90) args.push("--rotate-right-90");
+    // 裁剪图/排版图里的旋转已经烘焙进像素，不能再让上游转一次。
+    if (inputKind === "original" && this.store.settings.rotateRight90) args.push("--rotate-right-90");
     const result = await runner.run(args, {
       timeoutMs: TIMEOUTS.prepare,
       onLine: (line, stream) => {
@@ -641,11 +805,10 @@ export class TodooService {
           legacyBytes: paths.legacyBytes || 0,
           qlzBytes: paths.qlzPath && fs.existsSync(paths.qlzPath) ? fs.statSync(paths.qlzPath).size : 0,
           at: Date.now(),
-          inputName: this.image.name,
-          usedCrop,
+          inputName,
+          inputKind,
         };
         this.preparedSource = inputPath;
-        this.preparedUsedCrop = usedCrop;
       } else {
         this.finish({ ok: false, summary: "预览失败", error: "未找到生成的 payload 文件" });
         return;
@@ -697,7 +860,7 @@ export class TodooService {
       this.push();
 
       const args = ["--input", this.preparedSource, "--device-id", id, "--send"];
-      if (this.store.settings.rotateRight90 && !this.preparedUsedCrop) args.push("--rotate-right-90");
+      if (this.store.settings.rotateRight90 && this.prepared.inputKind === "original") args.push("--rotate-right-90");
       const result = await runner.run(args, {
         timeoutMs: TIMEOUTS.send,
         onLine: (line, stream) => {

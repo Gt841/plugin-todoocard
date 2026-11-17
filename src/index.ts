@@ -164,21 +164,38 @@ export default class TodoocardPlugin extends Plugin {
     this.panel.$on("alias", (e: CustomEvent) => this.service.setAlias(e.detail.id, e.detail.alias));
     this.panel.$on("filters", (e: CustomEvent) => this.service.setFilters(e.detail));
     this.panel.$on("pickimage", () => this.pickImage());
-    this.panel.$on("paste", () => this.pasteFromClipboard());
+    this.panel.$on("addimages", (e: CustomEvent<{ append?: boolean } | undefined>) => this.pickImages(e.detail?.append !== false));
+    this.panel.$on("bing", (e: CustomEvent<{ append?: boolean } | undefined>) => this.service.loadBingWallpaper(e.detail?.append !== false));
+    this.panel.$on("paste", (e: CustomEvent<{ append?: boolean } | undefined>) => this.pasteFromClipboard(!!e.detail?.append));
     this.panel.$on("dropimage", (e: CustomEvent) => {
-      this.service.setDroppedImage(Buffer.from(e.detail.bytes), e.detail.name).catch((err) => showMessage(String(err), 5000, "error"));
+      this.service.setDroppedImage(Buffer.from(e.detail.bytes), e.detail.name, !!e.detail.append).catch((err) => showMessage(String(err), 5000, "error"));
     });
+    this.panel.$on("dropimages", (e: CustomEvent<{ files: { bytes: Uint8Array; name: string }[]; append?: boolean }>) => {
+      const files = (e.detail?.files || []).map((file) => ({
+        bytes: Buffer.from(file.bytes),
+        name: file.name,
+      }));
+      this.service.addDroppedImages(files, e.detail?.append !== false).catch((err) => showMessage(String(err), 5000, "error"));
+    });
+    this.panel.$on("removeimage", (e: CustomEvent<string>) => this.service.removeImage(e.detail));
+    this.panel.$on("moveimage", (e: CustomEvent<{ path: string; delta: number }>) => this.service.moveImage(e.detail.path, e.detail.delta));
     this.panel.$on("clearimage", () => this.service.clearImage());
     this.panel.$on("rotate", (e: CustomEvent) => this.service.setRotate(!!e.detail));
     this.panel.$on("crop", () => this.service.invalidatePrepared());
-    this.panel.$on("prepare", (e: CustomEvent<{ bytes?: Uint8Array; name?: string } | undefined>) => {
+    this.panel.$on("prepare", (e: CustomEvent<{ bytes?: Uint8Array; name?: string; kind?: "crop" | "layout" } | undefined>) => {
       const detail = e.detail;
-      this.service.prepare(detail?.bytes?.length ? Buffer.from(detail.bytes) : null, detail?.name);
+      this.service.prepare(detail?.bytes?.length ? Buffer.from(detail.bytes) : null, detail?.name, detail?.kind);
     });
     this.panel.$on("send", (e: CustomEvent<string[] | undefined>) => this.service.send(e.detail));
     this.panel.$on("settings", (e: CustomEvent) => this.service.updateSettings(e.detail));
     this.panel.$on("clearLog", () => this.service.clearLog());
     this.panel.$on("opendir", () => this.openStateDir());
+    this.panel.$on("mode", (e: CustomEvent<"direct" | "layout">) => {
+      this.service.setImageMode(e.detail === "layout" ? "layout" : "direct");
+    });
+    this.panel.$on("cardlayout", (e: CustomEvent<"immersive" | "framed" | "wall">) => {
+      this.service.setCardLayout(e.detail === "wall" ? "wall" : e.detail === "framed" ? "framed" : "immersive");
+    });
 
     this.pasteTarget = target;
     target.addEventListener("paste", this.handlePaste, true);
@@ -208,14 +225,15 @@ export default class TodoocardPlugin extends Plugin {
       e.preventDefault();
       e.stopPropagation();
       const bytes = Buffer.from(await file.arrayBuffer());
-      await this.service.setPastedPng(bytes);
+      await this.service.setPastedPng(bytes, this.service.imageMode === "layout" && this.service.cardWall);
       return;
     }
     const text = data.getData("text/plain")?.trim();
     if (text && isImageFile(text) && fs.existsSync(text)) {
       e.preventDefault();
       e.stopPropagation();
-      await this.service.setImage(text);
+      if (this.service.imageMode === "layout" && this.service.cardWall) await this.service.addImages([text]);
+      else await this.service.setImage(text);
     }
   };
 
@@ -234,10 +252,10 @@ export default class TodoocardPlugin extends Plugin {
     return null;
   }
 
-  private async pasteFromClipboard() {
+  private async pasteFromClipboard(append = this.service.imageMode === "layout" && this.service.cardWall) {
     const png = this.readClipboardImage();
     if (png) {
-      await this.service.setPastedPng(png);
+      await this.service.setPastedPng(png, append);
       return;
     }
     try {
@@ -246,7 +264,7 @@ export default class TodoocardPlugin extends Plugin {
         for (const type of item.types) {
           if (type.startsWith("image/")) {
             const blob = await item.getType(type);
-            await this.service.setPastedPng(Buffer.from(await blob.arrayBuffer()));
+            await this.service.setPastedPng(Buffer.from(await blob.arrayBuffer()), append);
             return;
           }
         }
@@ -260,7 +278,8 @@ export default class TodoocardPlugin extends Plugin {
       text = clipboard?.readText?.() || "";
     } catch {}
     if (text.trim() && isImageFile(text.trim()) && fs.existsSync(text.trim())) {
-      await this.service.setImage(text.trim());
+      if (append) await this.service.addImages([text.trim()]);
+      else await this.service.setImage(text.trim());
       return;
     }
     showMessage("剪贴板里没有图片。请先截屏（⌘⇧⌃4）或复制一张图片后再试。", 5000, "info");
@@ -282,6 +301,29 @@ export default class TodoocardPlugin extends Plugin {
     } catch {}
     const manual = window.prompt?.("输入图片的本地路径：")?.trim();
     if (manual) await this.service.setImage(manual);
+  }
+
+  private async pickImages(append = true) {
+    try {
+      const remote = window.require?.("@electron/remote");
+      if (remote?.dialog) {
+        const r = await remote.dialog.showOpenDialog({
+          title: append ? "选择排版图片（最多 6 张）" : "选择一张图片",
+          properties: append ? ["openFile", "multiSelections"] : ["openFile"],
+          filters: IMAGE_FILTER,
+        });
+        if (r.canceled || !r.filePaths?.length) return;
+        if (append) await this.service.addImages(r.filePaths);
+        else await this.service.setImage(r.filePaths[0]);
+        return;
+      }
+    } catch {}
+    const manual = window.prompt?.(append ? "输入图片的本地路径（多张可用逗号分隔）：" : "输入图片的本地路径：")?.trim();
+    if (!manual) return;
+    const paths = manual.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean);
+    if (!paths.length) return;
+    if (append) await this.service.addImages(paths);
+    else await this.service.setImage(paths[0]);
   }
 
   private async openStateDir() {

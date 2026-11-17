@@ -1,10 +1,21 @@
 <script lang="ts">
   import { createEventDispatcher, onMount, afterUpdate } from "svelte";
-  import type { DeviceRow, Filters, PanelView } from "../types";
+  import type { DeviceRow, Filters, ImageMode, PanelView } from "../types";
   import { PANEL_HEIGHT, PANEL_WIDTH } from "../types";
   import { decodePayloadBin } from "../core/preview";
   import { computeCropGeometry, panCropCenter } from "../core/crop";
   import { MIRROR_PRESETS } from "../core/mirror";
+  import {
+    CARD_LAYOUTS,
+    MAX_CARD_IMAGES,
+    cardStyleFor,
+    formatCardDate,
+    todayCardDate,
+    type CardFields,
+    type CardLayout,
+    type CardStyle,
+  } from "../core/layout";
+  import { renderCard, type CardImage } from "./card";
 
   export let view: PanelView;
   const dispatch = createEventDispatcher();
@@ -22,6 +33,15 @@
   let targetKey = "";
   let selectedTargets: DeviceRow[] = [];
   let previewMode: "original" | "payload" = "original";
+  let imageMode: ImageMode = view.imageMode;
+  let cardFields: CardFields = { title: "", date: todayCardDate(), note: "" };
+  let showText = true;
+  let cardStyle: CardStyle = cardStyleFor(view.cardLayout || "immersive");
+  let cardCanvasEl: HTMLCanvasElement | null = null;
+  let loadedCardImages: Record<string, HTMLImageElement> = {};
+  let cardImageKey = "";
+  let cardDrawQueued = false;
+  let cardBusy = false;
   let sourceDraft = "";
   let sourceFor = "";
   let canvasEl: HTMLCanvasElement | null = null;
@@ -52,6 +72,19 @@
 
   $: envReady = view.prereq.checked && view.prereq.errors.length === 0;
   $: canInstallCore = envReady && !view.job.running;
+  $: bingBusy = view.job.running && view.job.kind === "bing";
+  $: isWall = cardStyle.layout === "wall";
+  $: neededImages = isWall ? view.images : view.images.slice(0, 1);
+  $: cardImagesReady = neededImages.length > 0 && neededImages.every((image) => {
+    const el = loadedCardImages[image.path];
+    return !!el && el.complete && el.naturalWidth > 0;
+  });
+  $: canPrepare = imageMode === "layout" ? view.images.length > 0 && cardImagesReady : !!view.image && !!cropImg;
+  $: prepareBusy = imageMode === "layout" ? cardBusy : cropBusy;
+  $: layoutName = CARD_LAYOUTS.find((item) => item.id === cardStyle.layout)?.name || "卡片排版";
+  // 关闭文字时不改动用户已填内容，只让卡片渲染忽略它们。
+  $: cardRenderFields = showText ? cardFields : { title: "", date: "", note: "" };
+  $: bingLabel = view.bingIndex > 0 ? "换一张壁纸" : "Bing 每日壁纸";
 
   const PALETTE: Record<number, [number, number, number]> = {
     0: [23, 23, 23],
@@ -66,10 +99,12 @@
 
   onMount(() => {
     rootEl?.focus();
+    // 主进程的全局粘贴/拖入靠这个标记判断追加还是替换；面板重建时同步一次当前版式。
+    dispatch("cardlayout", cardStyle.layout);
   });
 
-  $: if (view.image) toastedNoImage = false;
-  $: if (view.skill.installed && tab === "image" && !view.image && !toastedNoImage) {
+  $: if (view.image || view.images.length) toastedNoImage = false;
+  $: if (view.skill.installed && tab === "image" && !view.image && !view.images.length && !toastedNoImage) {
     toastedNoImage = true;
     showToast("尚未选择图片：拖入、粘贴截图，或点「选择图片」");
   }
@@ -124,9 +159,19 @@
     lastRotate = view.settings.rotateRight90;
     resetCrop(false);
   }
+  $: {
+    const key = view.images.map((image) => `${image.path}:${image.dataUrl.length}`).join("|");
+    if (key !== cardImageKey) {
+      cardImageKey = key;
+      syncCardImages(view.images);
+    }
+  }
 
   afterUpdate(() => {
-    if (tab === "image") queueCropDraw();
+    if (tab === "image") {
+      if (imageMode === "layout") queueCardDraw();
+      else queueCropDraw();
+    }
     if (!canvasEl || !view.prepared || previewMode !== "payload") return;
     if (lastDrawn === view.prepared.at) return;
     lastDrawn = view.prepared.at;
@@ -141,6 +186,155 @@
     const image = ctx.createImageData(width, height);
     image.data.set(decodePayloadBin(base64, width, height, PALETTE));
     ctx.putImageData(image, 0, 0);
+  }
+
+  function syncCardImages(images: PanelView["images"]) {
+    const next: Record<string, HTMLImageElement> = {};
+    for (const image of images) {
+      const existing = loadedCardImages[image.path];
+      if (existing) {
+        next[image.path] = existing;
+        continue;
+      }
+      const el = new Image();
+      el.onload = () => {
+        loadedCardImages = { ...loadedCardImages, [image.path]: el };
+        queueCardDraw();
+      };
+      el.onerror = () => {
+        loadedCardImages = { ...loadedCardImages };
+        queueCardDraw();
+      };
+      el.src = image.dataUrl;
+      next[image.path] = el;
+    }
+    loadedCardImages = next;
+    queueCardDraw();
+  }
+
+  function queueCardDraw() {
+    if (cardDrawQueued) return;
+    cardDrawQueued = true;
+    requestAnimationFrame(() => {
+      cardDrawQueued = false;
+      drawCardPreview();
+    });
+  }
+
+  function cardImagesAtCurrentOrder(): CardImage[] {
+    const result: CardImage[] = [];
+    for (const image of view.images) {
+      const el = loadedCardImages[image.path];
+      if (el && el.complete && el.naturalWidth > 0) {
+        result.push({ el, width: el.naturalWidth, height: el.naturalHeight });
+      }
+    }
+    return result;
+  }
+
+  function drawCardPreview() {
+    const canvas = cardCanvasEl;
+    if (!canvas) return;
+    if (canvas.width !== PANEL_WIDTH) canvas.width = PANEL_WIDTH;
+    if (canvas.height !== PANEL_HEIGHT) canvas.height = PANEL_HEIGHT;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    renderCard(ctx, PANEL_WIDTH, PANEL_HEIGHT, cardImagesAtCurrentOrder(), cardRenderFields, cardStyle);
+  }
+
+  function renderCardPng(): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+      if (!view.images.length) { reject(new Error("尚未选择图片")); return; }
+      const loaded = cardImagesAtCurrentOrder();
+      const required = isWall ? view.images.length : 1;
+      if (loaded.length < required) {
+        reject(new Error("图片尚未加载完成，请稍后再试"));
+        return;
+      }
+      const images = isWall ? loaded : loaded.slice(0, 1);
+      const canvas = document.createElement("canvas");
+      canvas.width = PANEL_WIDTH;
+      canvas.height = PANEL_HEIGHT;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { reject(new Error("无法创建画布")); return; }
+      renderCard(ctx, PANEL_WIDTH, PANEL_HEIGHT, images, cardRenderFields, cardStyle);
+      canvas.toBlob((blob) => {
+        if (!blob) { reject(new Error("无法生成排版卡片")); return; }
+        blob.arrayBuffer().then((buf) => resolve(new Uint8Array(buf))).catch(reject);
+      }, "image/png");
+    });
+  }
+
+  function setImageMode(mode: ImageMode) {
+    if (imageMode === mode) return;
+    imageMode = mode;
+    previewMode = "original";
+    sendConfirm = false;
+    dispatch("mode", mode);
+    dispatch("crop");
+    if (mode === "layout") queueCardDraw();
+  }
+
+  /** 照片墙追加图片；单图版式直接替换当前图片。 */
+  function addImagesAction() {
+    dispatch("addimages", { append: isWall });
+  }
+
+  function bingAction() {
+    dispatch("bing", { append: isWall });
+  }
+
+  function pasteAction() {
+    dispatch("paste", { append: isWall });
+  }
+
+  function applyCardLayout(layout: CardLayout) {
+    cardStyle = cardStyleFor(layout);
+    previewMode = "original";
+    dispatch("cardlayout", layout);
+    dispatch("crop");
+    queueCardDraw();
+  }
+
+  function patchCardStyle(patch: Partial<CardStyle>, immediate = true) {
+    cardStyle = { ...cardStyle, ...patch };
+    queueCardDraw();
+    notifyCropChanged(immediate);
+  }
+
+  function onCardFieldsChanged() {
+    previewMode = "original";
+    queueCardDraw();
+    notifyCropChanged();
+  }
+
+  function onTextToggle(e: Event) {
+    showText = (e.currentTarget as HTMLInputElement).checked;
+    previewMode = "original";
+    queueCardDraw();
+    notifyCropChanged(true);
+  }
+
+  function onCardRadius(e: Event) {
+    patchCardStyle({ radius: (e.currentTarget as HTMLInputElement).checked ? 22 : 0 });
+  }
+
+  function onCardBorder(e: Event) {
+    patchCardStyle({ border: (e.currentTarget as HTMLInputElement).checked });
+  }
+
+  function onCardInfoBand(e: Event) {
+    patchCardStyle({ infoBand: (e.currentTarget as HTMLInputElement).checked });
+  }
+
+  function onCardMargin(e: Event) {
+    patchCardStyle({ margin: Number((e.currentTarget as HTMLInputElement).value) || 0 }, false);
+  }
+
+  function preparedInputLabel(kind: "original" | "crop" | "layout"): string {
+    if (kind === "layout") return "排版卡片";
+    if (kind === "crop") return "2:3 取景裁剪";
+    return "原图（按卡片比例裁切）";
   }
 
   function cropGeometryAt(centerX = cropCx, centerY = cropCy) {
@@ -296,7 +490,28 @@
   }
 
   async function onPrepare() {
-    if (view.job.running || cropBusy) return;
+    if (view.job.running || cropBusy || cardBusy) return;
+    if (imageMode === "layout") {
+      if (!view.images.length) {
+        showToast("请先添加图片，或获取一张 Bing 每日壁纸");
+        return;
+      }
+      if (!cardImagesReady) {
+        showToast("图片仍在加载，请稍后再生成");
+        return;
+      }
+      cardBusy = true;
+      cropError = "";
+      try {
+        const bytes = await renderCardPng();
+        dispatch("prepare", { bytes, name: "card.png", kind: "layout" });
+      } catch (e) {
+        cropError = e instanceof Error ? e.message : String(e);
+      } finally {
+        cardBusy = false;
+      }
+      return;
+    }
     if (!view.image || !cropImg) {
       showToast("尚未选择图片：拖入、粘贴截图，或点「选择图片」");
       return;
@@ -306,7 +521,7 @@
     try {
       const bytes = await renderCropPng();
       const base = (view.image.name || "image").replace(/\.[^.]+$/, "");
-      dispatch("prepare", { bytes, name: `${base}-crop.png` });
+      dispatch("prepare", { bytes, name: `${base}-crop.png`, kind: "crop" });
     } catch (e) {
       cropError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -343,12 +558,16 @@
 
   function requestSend() {
     if (view.job.running) return;
-    if (!view.image) {
-      showToast("尚未选择图片：拖入、粘贴截图，或点「选择图片」");
+    if (imageMode === "layout" ? !view.images.length : !view.image) {
+      showToast(imageMode === "layout" ? "请先添加图片并生成排版预览" : "尚未选择图片：拖入、粘贴截图，或点「选择图片」");
       return;
     }
     if (!view.prepared) {
       showToast("请先生成并校验预览，再发送");
+      return;
+    }
+    if (view.prepared.inputKind !== (imageMode === "layout" ? "layout" : "crop")) {
+      showToast("当前预览已过期，请按当前模式重新生成");
       return;
     }
     if (!view.pairedDevices.length) {
@@ -462,10 +681,20 @@
   async function onDrop(e: DragEvent) {
     e.preventDefault();
     dropActive = false;
-    const file = e.dataTransfer?.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (!files.length) return;
+    if (imageMode === "layout") {
+      const selected = files.slice(0, isWall ? MAX_CARD_IMAGES : 1);
+      const payload = await Promise.all(selected.map(async (file) => ({
+        name: file.name,
+        bytes: new Uint8Array(await file.arrayBuffer()),
+      })));
+      dispatch("dropimages", { files: payload, append: isWall });
+      return;
+    }
+    const file = files[0];
     const bytes = new Uint8Array(await file.arrayBuffer());
-    dispatch("dropimage", { name: file.name, bytes });
+    dispatch("dropimage", { name: file.name, bytes, append: false });
   }
 
   function onDragOver(e: DragEvent) {
@@ -759,10 +988,11 @@
           <section class="preview">
             <div class="preview-frame" class:drop={dropActive}
               on:dragover={onDragOver} on:dragleave={() => (dropActive = false)} on:drop={onDrop}>
-              {#if view.image && view.prepared && previewMode === "payload"}
+              {#if view.prepared && previewMode === "payload" && (view.image || view.images.length)}
                 <canvas bind:this={canvasEl} class="shot payload-canvas"></canvas>
-                <span class="preview-badge">卡片六色效果</span>
-              {:else if view.image}
+              {:else if imageMode === "layout" && view.images.length}
+                <canvas bind:this={cardCanvasEl} class="shot card-canvas"></canvas>
+              {:else if imageMode === "direct" && view.image}
                 <canvas bind:this={cropCanvasEl} bind:clientWidth={cropW} bind:clientHeight={cropH}
                   class="shot crop-canvas" class:dragging={cropDragging}
                   on:pointerdown={onCropPointerDown}
@@ -770,16 +1000,22 @@
                   on:pointerup={onCropPointerUp}
                   on:pointercancel={onCropPointerUp}
                   on:wheel|nonpassive={onCropWheel}></canvas>
-                <span class="preview-badge">2:3 取景 · 拖动 / 滚轮缩放</span>
               {:else}
                 <div class="dropzone">
                   <div class="drop-icon">＋</div>
-                  <div>拖入图片，或从剪贴板粘贴截图</div>
-                  <div class="fineprint">JPG / PNG / HEIC，最大 100 MB / 5000 万像素</div>
+                  {#if imageMode === "layout"}
+                    <div>{isWall ? "拖入一张或多张图片" : "拖入一张图片"}</div>
+                    <div class="fineprint">
+                      {isWall ? `最多 ${MAX_CARD_IMAGES} 张` : "单图版式"} · JPG / PNG / HEIC
+                    </div>
+                  {:else}
+                    <div>拖入图片，或从剪贴板粘贴截图</div>
+                    <div class="fineprint">JPG / PNG / HEIC，最大 100 MB / 5000 万像素</div>
+                  {/if}
                 </div>
               {/if}
             </div>
-            {#if view.image && !(view.prepared && previewMode === "payload")}
+            {#if imageMode === "direct" && view.image && !(view.prepared && previewMode === "payload")}
               <div class="crop-controls">
                 <span class="crop-label">缩放</span>
                 <input type="range" min="1" max="5" step="0.02" value={cropZoom}
@@ -789,7 +1025,57 @@
               </div>
             {/if}
             {#if cropError}<p class="crop-error">{cropError}</p>{/if}
-            {#if view.image}
+            {#if imageMode === "layout"}
+              {#if view.images.length}
+                <div class="preview-meta">
+                  <span>528×792</span>
+                  <span>{isWall ? `${view.images.length} 张图片` : "单图版式"}</span>
+                  <span class="ellipsis">{layoutName}</span>
+                </div>
+              {/if}
+              {#if isWall && view.images.length}
+                <div class="source-strip left-strip">
+                  {#each view.images as img, i (img.path)}
+                    <div class="source-thumb">
+                      <img src={img.dataUrl} alt="" />
+                      <button class="thumb-remove" title="移除" on:click={() => dispatch("removeimage", img.path)}
+                        disabled={view.job.running}>×</button>
+                      {#if i > 0}
+                        <button class="thumb-move left" title="前移" on:click={() => dispatch("moveimage", { path: img.path, delta: -1 })}
+                          disabled={view.job.running}>‹</button>
+                      {/if}
+                      {#if i < view.images.length - 1}
+                        <button class="thumb-move right" title="后移" on:click={() => dispatch("moveimage", { path: img.path, delta: 1 })}
+                          disabled={view.job.running}>›</button>
+                      {/if}
+                    </div>
+                  {/each}
+                  {#if view.images.length < MAX_CARD_IMAGES}
+                    <button class="source-add" title="添加图片" on:click={addImagesAction}
+                      disabled={view.job.running}>＋</button>
+                  {/if}
+                </div>
+              {/if}
+              <div class="source-actions left-actions">
+                <button class="b3-button b3-button--outline small" on:click={addImagesAction}
+                  disabled={view.job.running || (isWall && view.images.length >= MAX_CARD_IMAGES)}>
+                  {view.images.length && !isWall ? "更换图片" : "添加图片"}
+                </button>
+                <button class="b3-button b3-button--outline small" on:click={bingAction}
+                  title="Bing 最近 8 天的壁纸；获取后再次点击可切换"
+                  disabled={view.job.running || (isWall && view.images.length >= MAX_CARD_IMAGES)}>
+                  {bingBusy ? "获取中…" : bingLabel}
+                </button>
+                <button class="b3-button b3-button--text small" on:click={pasteAction}
+                  disabled={view.job.running || (isWall && view.images.length >= MAX_CARD_IMAGES)}>粘贴截图</button>
+                <button class="b3-button b3-button--text small" on:click={() => dispatch("clearimage")}
+                  disabled={view.job.running || !view.images.length}>清空</button>
+              </div>
+              <p class="crop-hint">
+                {isWall ? "照片墙可放 2–6 张，左右箭头调整顺序。" : "当前版式只使用第 1 张图片。"}
+                预览即发送画面；改字段或版式后需重新生成。
+              </p>
+            {:else if imageMode === "direct" && view.image}
               <div class="preview-meta">
                 <span>{view.image.width}×{view.image.height}</span>
                 <span>{fmtBytes(view.image.bytes)}</span>
@@ -800,17 +1086,92 @@
           </section>
 
           <section class="image-controls">
-            <div class="button-grid">
-              <button class="b3-button b3-button--outline" on:click={() => dispatch("pickimage")} disabled={view.job.running}>选择图片</button>
-              <button class="b3-button b3-button--outline" on:click={() => dispatch("paste")} disabled={view.job.running}>粘贴截图</button>
-              <button class="b3-button b3-button--text" on:click={() => dispatch("clearimage")} disabled={view.job.running || !view.image}>清空</button>
+            <div class="mode-seg">
+              <button class:active={imageMode === "direct"} on:click={() => setImageMode("direct")}>直接发送</button>
+              <button class:active={imageMode === "layout"} on:click={() => setImageMode("layout")}>卡片排版</button>
             </div>
 
-            <label class="checkline" title="屏幕方向由上游固定为 TodooCard/T3 面板校准，不提供屏幕方向覆盖。">
-              <input type="checkbox" checked={view.settings.rotateRight90}
-                on:change={onRotate} />
-              源图横竖方向不对（向右旋转 90°）
-            </label>
+            {#if imageMode === "direct"}
+              <div class="button-grid">
+                <button class="b3-button b3-button--outline" on:click={() => dispatch("pickimage")} disabled={view.job.running}>选择图片</button>
+                <button class="b3-button b3-button--outline" on:click={() => dispatch("paste", { append: false })} disabled={view.job.running}>粘贴截图</button>
+                <button class="b3-button b3-button--text" on:click={() => dispatch("clearimage")} disabled={view.job.running || !view.image}>清空</button>
+              </div>
+
+              <label class="checkline" title="屏幕方向由上游固定为 TodooCard/T3 面板校准，不提供屏幕方向覆盖。">
+                <input type="checkbox" checked={view.settings.rotateRight90}
+                  on:change={onRotate} />
+                源图横竖方向不对（向右旋转 90°）
+              </label>
+            {:else}
+              <div class="layout-block">
+                <div class="prepare-title">版式</div>
+                <div class="layout-presets">
+                  {#each CARD_LAYOUTS as preset (preset.id)}
+                    <button class="preset" class:active={cardStyle.layout === preset.id}
+                      on:click={() => applyCardLayout(preset.id)} disabled={view.job.running}>
+                      <span class="preset-name">{preset.name}</span>
+                      <span class="preset-hint">{preset.hint}</span>
+                    </button>
+                  {/each}
+                </div>
+              </div>
+
+              <div class="layout-block">
+                <div class="text-head">
+                  <div class="prepare-title">文字</div>
+                  <label class="text-switch" title="关闭后卡片只保留图片，标题、日期和一句话不会出现在画面上">
+                    <input type="checkbox" checked={showText} on:change={onTextToggle} disabled={view.job.running} />
+                    显示文字
+                  </label>
+                </div>
+                {#if showText}
+                  <div class="field-row">
+                    <label for="tc-card-title">标题</label>
+                    <input id="tc-card-title" class="b3-text-field" bind:value={cardFields.title}
+                      on:input={onCardFieldsChanged} maxlength="24" placeholder="例如：山间的清晨" />
+                  </div>
+                  <div class="field-row">
+                    <label for="tc-card-date">日期</label>
+                    <input id="tc-card-date" type="date" class="b3-text-field" bind:value={cardFields.date}
+                      on:input={onCardFieldsChanged} />
+                    <span class="field-note">{formatCardDate(cardFields.date) || "不显示"}</span>
+                  </div>
+                  <div class="field-row">
+                    <label for="tc-card-note">一句话</label>
+                    <input id="tc-card-note" class="b3-text-field" bind:value={cardFields.note}
+                      on:input={onCardFieldsChanged} maxlength="60" placeholder="例如：把今天的光景留在卡片上" />
+                  </div>
+                {:else}
+                  <p class="fineprint">已关闭：标题、日期和一句话不显示，重新打开后保留已填内容。</p>
+                {/if}
+              </div>
+
+              <div class="layout-block">
+                <div class="prepare-title">样式</div>
+                <div class="style-grid">
+                  <label class="checkline">
+                    <input type="checkbox" checked={cardStyle.radius > 0} on:change={onCardRadius} />
+                    圆角
+                  </label>
+                  <label class="checkline">
+                    <input type="checkbox" checked={cardStyle.border} on:change={onCardBorder} />
+                    边框
+                  </label>
+                  <label class="checkline" class:muted={!showText} title={showText ? "" : "文字关闭时信息带不会显示"}>
+                    <input type="checkbox" checked={cardStyle.infoBand} on:change={onCardInfoBand}
+                      disabled={!showText} />
+                    底部信息带
+                  </label>
+                </div>
+                <div class="field-row">
+                  <label for="tc-card-margin">留白</label>
+                  <input id="tc-card-margin" type="range" min="0" max="48" step="4"
+                    value={cardStyle.margin} on:input={onCardMargin} />
+                  <span class="field-note">{cardStyle.margin}px</span>
+                </div>
+              </div>
+            {/if}
 
             <div class="prepare-block">
               <div class="prepare-title">生成并校验</div>
@@ -821,7 +1182,7 @@
                 </div>
                 <dl class="facts compact">
                   <div><dt>控制器位图</dt><dd>{fmtBytes(view.prepared.bytes)}</dd></div>
-                  <div><dt>输入画面</dt><dd>{view.prepared.usedCrop ? "2:3 取景裁剪" : "原图（按卡片比例裁切）"}</dd></div>
+                  <div><dt>输入画面</dt><dd>{preparedInputLabel(view.prepared.inputKind)}</dd></div>
                   <div><dt>v157+ payload</dt><dd>{fmtBytes(view.prepared.qlzBytes)}</dd></div>
                   <div><dt>legacy payload</dt><dd>{fmtBytes(view.prepared.legacyBytes)}</dd></div>
                 </dl>
@@ -830,9 +1191,11 @@
                   <button class:active={previewMode === "payload"} on:click={() => (previewMode = "payload")}>卡片效果</button>
                 </div>
               {/if}
-              <button class="b3-button b3-button--outline block" class:dim={!view.image || !cropImg}
-                on:click={onPrepare} disabled={cropBusy || view.job.running}>
-                {cropBusy ? "正在生成裁剪图…" : view.prepared ? "重新生成" : "生成预览"}
+              <button class="b3-button b3-button--outline block" class:dim={!canPrepare}
+                on:click={onPrepare} disabled={prepareBusy || view.job.running}>
+                {prepareBusy
+                  ? (imageMode === "layout" ? "正在生成排版卡片…" : "正在生成裁剪图…")
+                  : view.prepared ? "重新生成" : "生成预览"}
               </button>
             </div>
 
@@ -874,7 +1237,7 @@
                   {/each}
                 </div>
                 <button class="b3-button b3-button--outline accent send-btn block"
-                  class:dim={!view.image || !view.prepared || targetIds.length === 0}
+                  class:dim={!(imageMode === "layout" ? view.images.length : view.image) || !view.prepared || targetIds.length === 0}
                   on:click={requestSend} disabled={view.job.running}>
                   {targetIds.length > 1 ? `发送到 ${targetIds.length} 台卡片` : "发送到卡片"}
                 </button>
@@ -1234,10 +1597,6 @@
   .crop-scale { width: 38px; text-align: right; opacity: 0.6; font-variant-numeric: tabular-nums; }
   .crop-hint { max-width: 300px; margin: 6px auto 0; font-size: 10px; line-height: 1.5; opacity: 0.5; text-align: center; }
   .crop-error { max-width: 300px; margin: 6px auto 0; font-size: 11px; color: var(--tc-red); text-align: center; }
-  .preview-badge {
-    position: absolute; left: 8px; bottom: 8px; font-size: 10px; padding: 2px 7px;
-    border-radius: 999px; background: rgba(0,0,0,0.55); color: #fff;
-  }
   .dropzone { text-align: center; padding: 18px; font-size: 12px; line-height: 1.8; opacity: 0.7; }
   .drop-icon {
     width: 42px; height: 42px; margin: 0 auto 8px; border-radius: 50%;
@@ -1247,9 +1606,77 @@
   .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
   .image-controls { min-width: 0; min-height: 0; overflow-y: auto; padding-right: 4px; }
   .button-grid { display: grid; grid-template-columns: 1fr 1fr auto; gap: 7px; }
+  .mode-seg {
+    display: flex; gap: 3px; padding: 3px; border-radius: 8px;
+    background: color-mix(in srgb, var(--b3-theme-on-surface) 6%, var(--b3-theme-background));
+    border: 1px solid var(--b3-border-color); margin-bottom: 12px;
+  }
+  .mode-seg button {
+    flex: 1; border: none; background: none; color: inherit; cursor: pointer;
+    padding: 6px 8px; border-radius: 6px; font-size: 12px; opacity: 0.6;
+  }
+  .mode-seg button.active {
+    background: var(--b3-theme-background); opacity: 1; font-weight: 600;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+  }
+  .layout-block { margin-top: 14px; }
+  .source-strip { display: flex; flex-wrap: wrap; gap: 7px; }
+  .left-strip { max-width: 300px; margin: 8px auto 0; justify-content: center; }
+  .source-thumb {
+    position: relative; width: 56px; height: 56px; border-radius: 7px; overflow: hidden;
+    border: 1px solid var(--b3-border-color); flex: none;
+    background: color-mix(in srgb, var(--b3-theme-on-surface) 5%, var(--b3-theme-background));
+  }
+  .source-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb-remove {
+    position: absolute; right: 2px; top: 2px; width: 16px; height: 16px; padding: 0;
+    border: none; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff;
+    font-size: 12px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .thumb-move {
+    position: absolute; bottom: 2px; width: 16px; height: 16px; padding: 0;
+    border: none; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff;
+    font-size: 11px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .thumb-move.left { left: 2px; }
+  .thumb-move.right { right: 2px; }
+  .source-add {
+    width: 56px; height: 56px; flex: none; border-radius: 7px; cursor: pointer;
+    border: 1px dashed var(--b3-border-color); background: none; color: inherit;
+    font-size: 18px; opacity: 0.6;
+  }
+  .source-add:hover { border-color: var(--tc-accent); opacity: 1; }
+  .source-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+  .left-actions { max-width: 300px; margin: 8px auto 0; justify-content: center; }
+  .layout-presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .preset {
+    display: flex; flex-direction: column; gap: 3px; text-align: left;
+    padding: 8px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--b3-border-color); background: var(--b3-theme-background); color: inherit;
+  }
+  .preset:hover:not(:disabled) { border-color: color-mix(in srgb, var(--tc-accent) 45%, var(--b3-border-color)); }
+  .preset.active {
+    border-color: var(--tc-accent);
+    background: color-mix(in srgb, var(--tc-accent) 8%, var(--b3-theme-background));
+  }
+  .preset:disabled { opacity: 0.6; cursor: default; }
+  .preset-name { font-size: 12px; font-weight: 600; }
+  .preset-hint { font-size: 10px; opacity: 0.55; line-height: 1.4; }
+  .field-row { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+  .field-row > label { width: 38px; flex: none; font-size: 12px; opacity: 0.65; }
+  .field-row .b3-text-field { flex: 1; min-width: 0; }
+  .field-row input[type="range"] { flex: 1; min-width: 0; accent-color: var(--tc-accent); }
+  .field-note { font-size: 11px; opacity: 0.55; min-width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
+  .style-grid { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .style-grid .checkline { margin: 0; }
   .checkline { display: flex; align-items: center; gap: 7px; font-size: 12px; margin: 10px 0 2px; }
   .prepare-block { margin-top: 16px; border-top: 1px solid var(--b3-border-color); padding-top: 12px; }
   .prepare-title { font-weight: 600; margin-bottom: 7px; }
+  .text-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+  .text-head .prepare-title { margin-bottom: 0; }
+  .text-switch { display: flex; align-items: center; gap: 6px; font-size: 11px; opacity: 0.72; cursor: pointer; }
+  .text-switch input { accent-color: var(--tc-accent); }
+  .checkline.muted { opacity: 0.45; }
   .ok-line { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--tc-green); margin: 5px 0; }
   .seg { display: inline-flex; border: 1px solid var(--b3-border-color); border-radius: 6px; overflow: hidden; margin: 7px 0; }
   .seg button { background: none; border: none; padding: 3px 10px; font-size: 11px; cursor: pointer; color: inherit; opacity: 0.6; }
