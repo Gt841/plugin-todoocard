@@ -1,5 +1,8 @@
 # macOS 配对与发送指南（纯 Python 模式）
 
+> **已作废（2026-11-17）**：本文对应旧的「本地核心管理器」架构。当前插件直接调用上游
+> `TodooCard_Skills`（Swift CoreBluetooth），配对流程请以仓库根目录 [README](../README.md) 为准。
+
 在 macOS 上，本插件以**纯 Python 模式**运行土豆片核心：启动核心时插件会自动设置环境变量 `TODOOCARD_FORCE_PYTHON=1`，让核心改用 Python（bleak）实现蓝牙扫描与发送，**不使用 Swift 配对助手**。因此配对必须先在 macOS 系统层面完成（OS 级配对），之后才能在核心 Web UI 里扫描设备并发送。
 
 ## 配对与发送步骤

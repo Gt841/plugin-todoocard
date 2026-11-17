@@ -2,8 +2,8 @@
 
 - 日期：2026-11-11
 - 作者：Gt841（维护者）＋ Qoder
-- 状态：已批准设计，待写实现计划
-- 项目路径：`/Users/guantao/workSpace/siyuan/plugin-todoocard`
+- 状态：Phase 1 已实现（核心管理 / ①→②→④ 级联 / 控制台 / 退出清理，vitest 80/80）。**分发 / 安装 / fork 部分已被 v2 取代**，见 `2026-11-12-upstream-core-extension-design.md`（上游源码自动采用 + 版本匹配扩展包）；本文其余部分仍为现行设计依据。
+- 项目路径：`<repo>`
 - 模板：复用 `plugin-pptgo`（Svelte + TypeScript + Vite，`siyuan` 0.9.2 API，`siyuan-kit-svelte`，`scripts/make_dev_link.js`，`vite-plugin-zip-pack`）
 
 ## 1. 背景与目标

@@ -1,14 +1,13 @@
 {
   "name": "plugin-todoocard",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "make-link": "node --no-warnings ./scripts/make_dev_link.js",
     "dev": "vite build --watch",
     "build": "vite build",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "tag": "git add ./plugin.json && git commit -m \"update version\" && git push && node ./autoTag.js"
+    "test:watch": "vitest"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^2.4.1",
@@ -25,8 +24,5 @@
     "vite-plugin-static-copy": "^0.15.0",
     "vite-plugin-zip-pack": "^1.0.5",
     "vitest": "^0.34.6"
-  },
-  "dependencies": {
-    "siyuan-kit-svelte": "^0.1.3"
   }
 }

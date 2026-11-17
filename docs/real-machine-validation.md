@@ -1,5 +1,8 @@
 # 真机端到端验证清单（Phase 1）
 
+> **已作废（2026-11-17）**：本文对应旧的「本地核心管理器 + manifest v2」架构。当前插件改用
+> 上游 `TodooCard_Skills`，验证步骤请以仓库根目录 [README](../README.md) 为准。
+
 > **2026-11-12 更新**：分发模型已改为 v2（上游源码 tarball + 版本匹配扩展包）。
 > 本清单的**步骤 0–1（dev-kit 打补丁、本地 http 服务、旧版 manifest）已作废**，
 > 资产准备改走 `../todoocard-core-dist/scripts/{build-extension,build-manifest,verify}.sh`，
@@ -23,7 +26,7 @@
 ### 0.1 构建并安装插件到思源
 
 ```bash
-cd /Users/guantao/workSpace/siyuan/plugin-todoocard
+cd <repo>
 npm install
 npm run build          # 生成 dist/ 与 package.zip
 ```

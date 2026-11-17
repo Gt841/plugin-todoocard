@@ -1,118 +1,136 @@
-import { describe, it, expect, beforeEach } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { CoreStore, defaultCoreDir, coreVersionOf } from "./store";
-import type { CoreJson } from "../types";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  DEFAULT_SETTINGS,
+  DEFAULT_SOURCE_URL,
+  PINNED_COMMIT,
+  StateStore,
+  displayName,
+  normalizeState,
+} from "./store";
 
-function v2(platform = "darwin", arch = "arm64"): CoreJson {
-  return {
-    version: "2.0.0",
-    coreVersion: "1.0.11",
-    coreCommit: "3642b4b25e42e38776f3227db601474173f915b1",
-    installedAt: 1,
-    source: { manifestUrl: "", sourceSha256: "s", pythonSha256: "p", extensionSha256: "e" },
-    launchMode: null, platform, arch,
-  };
+const ID = "00112233-4455-6677-8899-aabbccddeeff";
+const ID2 = "ffeeddcc-bbaa-9988-7766-554433221100";
+const dirs: string[] = [];
+
+function tempDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tc-store-"));
+  dirs.push(dir);
+  return dir;
 }
 
-let dir: string;
-beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "core-")); });
+afterEach(() => {
+  for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
-describe("defaultCoreDir", () => {
-  it("appends todoocard-core to dataDir", () => {
-    expect(defaultCoreDir("/data")).toBe(path.join("/data", "todoocard-core"));
+describe("默认配置", () => {
+  it("默认来源钉死到固定 commit", () => {
+    expect(PINNED_COMMIT).toMatch(/^[0-9a-f]{40}$/);
+    expect(DEFAULT_SOURCE_URL).toContain(`/commit/${PINNED_COMMIT}`);
+    expect(DEFAULT_SETTINGS.sourceUrl).toBe(DEFAULT_SOURCE_URL);
   });
 });
 
-describe("CoreStore.detect", () => {
-  it("not-installed when empty", () => {
-    expect(new CoreStore(dir).detect()).toBe("not-installed");
+describe("normalizeState", () => {
+  it("丢弃非法设备、补全字段并接受 key 作为 id", () => {
+    const state = normalizeState({
+      settings: { sourceUrl: "  https://github.com/a/b  ", autoProbeAfterPair: "yes" },
+      devices: {
+        [ID]: { name: "A", paired: true, alias: "书桌" },
+        bad: { name: "B" },
+      },
+    });
+    expect(state.devices[ID]).toMatchObject({ id: ID, name: "A", alias: "书桌", paired: true });
+    expect(state.devices.bad).toBeUndefined();
+    expect(state.settings.sourceUrl).toBe("https://github.com/a/b");
+    expect(state.settings.autoProbeAfterPair).toBe(true);
   });
-  it("installed when python + server.py + core.json present", () => {
-    const s = new CoreStore(dir);
-    fs.mkdirSync(path.dirname(s.paths.python), { recursive: true });
-    fs.writeFileSync(s.paths.python, "#!/bin/sh\n");
-    fs.mkdirSync(path.dirname(s.paths.serverPy), { recursive: true });
-    fs.writeFileSync(s.paths.serverPy, "");
-    s.writeCoreJson(v2());
-    expect(s.detect()).toBe("installed");
+
+  it("空来源回退到默认地址", () => {
+    const state = normalizeState({ settings: { sourceUrl: "   " } });
+    expect(state.settings.sourceUrl).toBe(DEFAULT_SOURCE_URL);
   });
 });
 
-describe("CoreStore cached mode", () => {
-  it("round-trips launchMode", () => {
-    const s = new CoreStore(dir);
-    s.writeCoreJson(v2());
-    expect(s.getCachedMode()).toBeNull();
-    s.setCachedMode("disclaim");
-    expect(s.getCachedMode()).toBe("disclaim");
-    expect(new CoreStore(dir).readCoreJson()!.launchMode).toBe("disclaim");
+describe("StateStore", () => {
+  it("原子保存后可重新加载", () => {
+    const dir = tempDir();
+    const store = new StateStore(dir);
+    store.ensureDir();
+    store.mergeSeen([{
+      id: ID,
+      name: "Card",
+      rssi: -50,
+      services: [],
+      compatible: true,
+      manufacturerId: 0x5053,
+      screenType: 0x134c,
+      firmware: 0xa7,
+      secure: true,
+      pairingOpen: false,
+      recovery: false,
+      turbo: true,
+      lastSeenAt: 1,
+    }]);
+    store.setAlias(ID, "  书桌  ");
+
+    const loaded = new StateStore(dir).load();
+    expect(loaded.devices[ID].alias).toBe("书桌");
+    expect(loaded.devices[ID].compatible).toBe(true);
+    expect(fs.existsSync(path.join(dir, "state.json"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "state.json.tmp"))).toBe(false);
   });
-  it("readCoreJson returns null on missing/corrupt", () => {
-    expect(new CoreStore(dir).readCoreJson()).toBeNull();
-    fs.writeFileSync(new CoreStore(dir).paths.coreJson, "{bad");
-    expect(new CoreStore(dir).readCoreJson()).toBeNull();
+
+  it("再次扫描不会把设备误标为已配对，也不会清掉别名", () => {
+    const dir = tempDir();
+    const store = new StateStore(dir);
+    store.setAlias(ID, "书房");
+    store.record(ID, { paired: true, lastPairedAt: 100 });
+    store.mergeSeen([{
+      id: ID,
+      name: "Card",
+      rssi: -60,
+      services: [],
+      compatible: true,
+      manufacturerId: 0x5053,
+      screenType: 0x134c,
+      firmware: 0xa7,
+      secure: true,
+      pairingOpen: false,
+      recovery: false,
+      turbo: true,
+      lastSeenAt: 2,
+    }]);
+    expect(store.state.devices[ID].paired).toBe(true);
+    expect(store.state.devices[ID].lastPairedAt).toBe(100);
+    expect(store.state.devices[ID].alias).toBe("书房");
+  });
+
+  it("按大小写归一化记录与删除", () => {
+    const dir = tempDir();
+    const store = new StateStore(dir);
+    store.record(ID2.toUpperCase(), { name: "X" });
+    expect(store.state.devices[ID2]).toBeTruthy();
+    store.remove(ID2.toUpperCase());
+    expect(store.state.devices[ID2]).toBeUndefined();
+  });
+
+  it("损坏 JSON 回退到空状态", () => {
+    const dir = tempDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "state.json"), "{bad", "utf8");
+    const store = new StateStore(dir);
+    expect(store.load().devices).toEqual({});
+    expect(store.settings.sourceUrl).toBe(DEFAULT_SOURCE_URL);
   });
 });
 
-describe("detect platform-aware python path", () => {
-  function mkStore(platform: string) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "store-"));
-    const s = new CoreStore(dir, platform);
-    fs.mkdirSync(path.join(dir, "eink"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "eink", "server.py"), "");
-    s.writeCoreJson(v2(platform, "x64"));
-    return { dir, s };
-  }
-  it("win32: installed when python/python.exe exists", () => {
-    const { dir, s } = mkStore("win32");
-    fs.mkdirSync(path.join(dir, "python"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "python", "python.exe"), "");
-    expect(s.detect()).toBe("installed");
-  });
-  it("win32: not-installed when only posix layout exists", () => {
-    const { dir, s } = mkStore("win32");
-    fs.mkdirSync(path.join(dir, "python", "bin"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "python", "bin", "python3"), "");
-    expect(s.detect()).toBe("not-installed");
-  });
-  it("darwin: installed when python/bin/python3 exists", () => {
-    const { dir, s } = mkStore("darwin");
-    fs.mkdirSync(path.join(dir, "python", "bin"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "python", "bin", "python3"), "");
-    expect(s.detect()).toBe("installed");
-  });
-});
-
-describe("core.json v2 + migration", () => {
-  it("round-trips coreVersion / coreCommit / three sha256 fields", () => {
-    const s = new CoreStore(dir);
-    const cj = v2();
-    s.writeCoreJson(cj);
-    const read = s.readCoreJson()!;
-    expect(read.coreVersion).toBe("1.0.11");
-    expect(read.coreCommit).toBe("3642b4b25e42e38776f3227db601474173f915b1");
-    expect(read.source).toEqual(cj.source);
-  });
-  it("coreVersionOf returns the v2 version", () => {
-    expect(coreVersionOf(v2())).toBe("1.0.11");
-  });
-  it("coreVersionOf(null) is 0.0.0", () => {
-    expect(coreVersionOf(null)).toBe("0.0.0");
-  });
-  it("legacy core.json (no coreVersion) still detects as installed, but version is 0.0.0", () => {
-    const s = new CoreStore(dir);
-    fs.mkdirSync(path.dirname(s.paths.python), { recursive: true });
-    fs.writeFileSync(s.paths.python, "#!/bin/sh\n");
-    fs.mkdirSync(path.dirname(s.paths.serverPy), { recursive: true });
-    fs.writeFileSync(s.paths.serverPy, "");
-    fs.writeFileSync(s.paths.coreJson, JSON.stringify({
-      version: "1.0.0", installedAt: 1,
-      source: { manifestUrl: "", pythonSha256: "", einkSha256: "" },
-      launchMode: null, platform: "darwin", arch: "arm64",
-    }));
-    expect(s.detect()).toBe("installed");               // 不因缺字段判 not-installed
-    expect(coreVersionOf(s.readCoreJson())).toBe("0.0.0"); // doInstall 据此必更新 → 写 v2
+describe("displayName", () => {
+  it("别名优先，其次设备名，最后短 id", () => {
+    expect(displayName({ id: ID, alias: "书房", name: "Card" })).toBe("书房");
+    expect(displayName({ id: ID, name: "Card" })).toBe("Card");
+    expect(displayName({ id: ID })).toBe(ID.slice(0, 8));
   });
 });

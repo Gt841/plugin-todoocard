@@ -15,7 +15,7 @@
 
 ## Global Constraints
 
-- 插件仓库：`/Users/guantao/workSpace/siyuan/plugin-todoocard`；dist 仓库本地路径：`/Users/guantao/workSpace/siyuan/todoocard-core-dist`（**本轮只建本地内容，不建 GitHub 仓库**）。
+- 插件仓库：`<repo>`；dist 仓库本地路径：`<local-core-dist>`（**本轮只建本地内容，不建 GitHub 仓库**）。
 - 目标上游核心版本：`1.0.11`。
 - **钉 sha（用户裁定）**：源码资产按 **commit sha** 钉死，不用 tag 下载。
   - `coreCommit = 3642b4b25e42e38776f3227db601474173f915b1`（`v1.0.11-macos` 指向的 commit）。

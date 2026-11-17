@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Plugin name: `plugin-todoocard`; project path `/Users/guantao/workSpace/siyuan/plugin-todoocard`.
+- Plugin name: `plugin-todoocard`; project path `<repo>`.
 - `minAppVersion: "3.0.1"`; `backends: ["windows","linux","darwin"]`; `frontends: ["desktop","desktop-window"]`.
 - Core HTTP port default: `8199`.
 - macOS pure-Python env toggle: `TODOOCARD_FORCE_PYTHON=1` (set when launching core on darwin).
@@ -135,7 +135,7 @@ const args = minimist(process.argv.slice(2));
 const isWatch = args.watch || args.w || false;
 const devDistDir = process.env.SIYUAN_PLUGIN_DIR
   ? resolve(process.env.SIYUAN_PLUGIN_DIR, "plugin-todoocard")
-  : resolve("/Users/guantao/Library/Application Support/SiYuan/data/plugins/plugin-todoocard");
+  : resolve("<home>/Library/Application Support/SiYuan/data/plugins/plugin-todoocard");
 const distDir = isWatch ? devDistDir : "./dist";
 
 export default defineConfig({
@@ -1748,7 +1748,7 @@ Ensure `import os` exists at top of `card.py` (add if missing).
 Run:
 ```bash
 cp -r /tmp/todoocard-research/eink /tmp/eink-fork-test
-cd /tmp/eink-fork-test && git apply /Users/guantao/workSpace/siyuan/plugin-todoocard/fork-patch/force-python.patch
+cd /tmp/eink-fork-test && git apply <repo>/fork-patch/force-python.patch
 TODOOCARD_FORCE_PYTHON=1 python3 -c "import ast,os; src=open('card.py').read(); assert 'TODOOCARD_FORCE_PYTHON' in src; print('patch present')"
 ```
 Expected: patch applies; assertion prints `patch present`. (Full send verification is Task 12 real-machine.)

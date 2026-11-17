@@ -1,201 +1,286 @@
-import { Plugin, Dialog, showMessage, openTab, Setting } from "siyuan";
-import ControlPanel from "./ui/ControlPanel.svelte";
-import TodooWebview from "./ui/TodooWebview.svelte";
-import { DEFAULT_SETTINGS, normalizeLaunch } from "./settings";
-import type { Settings } from "./types";
-import { CoreStore, defaultCoreDir, coreVersionOf } from "./core/store";
-import { CoreLifecycle } from "./core/lifecycle";
-import { installCore, httpGetText } from "./core/installer";
-import { parseManifest, selectPlatform, platformKey, compareVersion } from "./core/manifest";
-import { pythonExe, type LaunchCtx } from "./core/launcher";
+import { Plugin, Dialog, Setting, showMessage } from "siyuan";
+import App from "./ui/App.svelte";
+import { TodooService } from "./core/service";
+import { resolveStateDir } from "./core/paths";
+import { isImageFile } from "./core/image";
 import fs from "fs";
-import path from "path";
 
 declare const window: any;
 
-const STORAGE_NAME = "settings.json";
+const IMAGE_FILTER = [{ name: "图片", extensions: ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", "tiff", "bmp"] }];
 
 export default class TodoocardPlugin extends Plugin {
-  private settings: Settings = { ...DEFAULT_SETTINGS };
-  private store!: CoreStore;
-  private lifecycle!: CoreLifecycle;
+  private service!: TodooService;
   private dialog: Dialog | null = null;
   private panel: any = null;
-  private logText = "";
-  private running = false;
-  private currentMode = "";
-  private ipc: any = null;
-  private onBeforeUnload = () => { this.lifecycle?.stop(); };
-  private onIpcExit = () => { this.lifecycle?.stop(); };
+  private stateDir = "";
+  private settingSource: HTMLInputElement | null = null;
+  private settingAutoProbe: HTMLInputElement | null = null;
+  private pasteTarget: HTMLElement | null = null;
 
   async onload() {
-    this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData(STORAGE_NAME)) };
-    this.settings.launch = normalizeLaunch(this.settings.launch);
-    this.rebuild();
+    this.stateDir = this.computeStateDir();
+    this.service = new TodooService({
+      stateDir: this.stateDir,
+      platform: process.platform,
+      onUpdate: () => this.refresh(),
+      notify: (message, level) => showMessage(message, 5000, level === "error" ? "error" : "info"),
+    });
+    // 先同步读一次状态，确保下面 SiYuan 插件设置面板显示的是已保存的源与开关；
+    // init() 仍会在稍后完成环境检查和目录清理。
+    this.service.store.load();
+
+    this.addTopBar({
+      icon: `<svg viewBox="0 0 24 24" width="16" height="16"><rect x="4" y="2" width="16" height="20" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 8h8M8 12h8M8 16h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="18" cy="18" r="3.5" fill="#e59a2f"/></svg>`,
+      title: "土豆片 · TodooCard",
+      position: "right",
+      callback: () => this.openPanel(),
+    });
+
     this.setting = new Setting({
-      confirmCallback: () => {
-        this.saveData(STORAGE_NAME, this.settings).catch((e) => { this.log("保存设置失败: " + e); showMessage("保存设置失败，详见日志", 5000, "error"); });
-        this.rebuild(); this.refresh();
-      },
+      confirmCallback: () => this.saveSettings(),
     });
     this.setting.addItem({
-      title: "Manifest URL",
-      description: "核心下载清单地址（维护者托管；本地开发可用 file:// 指向本地 manifest）",
+      title: "核心来源",
+      description: "默认钉死到上游的一个 commit；保存后点面板里的「下载 / 更新核心」生效。",
       createActionElement: () => {
         const input = document.createElement("input");
         input.className = "b3-text-field fn__block";
-        input.placeholder = "https://example.com/manifest.json";
-        input.value = this.settings.manifestUrl;
-        input.addEventListener("change", () => { this.settings.manifestUrl = input.value.trim(); });
+        input.spellcheck = false;
+        input.value = this.service.store.settings.sourceUrl;
+        this.settingSource = input;
         return input;
       },
     });
-    this.addTab({
-      type: "todoocard-web",
-      init() {
-        const url = this.data?.url as string;
-        const div = document.createElement("div");
-        div.setAttribute("style", "width:100%;height:100%;position:relative;");
-        new TodooWebview({ target: div, props: { src: url } });
-        this.element.appendChild(div);
+    this.setting.addItem({
+      title: "配对后自动探测",
+      description: "配对成功后立即执行一次加密连接验证，确认系统绑定可用。",
+      createActionElement: () => {
+        const label = document.createElement("label");
+        label.className = "fn__flex";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.className = "b3-switch fn__flex-center";
+        cb.checked = this.service.store.settings.autoProbeAfterPair;
+        this.settingAutoProbe = cb;
+        label.appendChild(cb);
+        return label;
       },
-      destroy() {},
     });
-    this.addTopBar({
-      icon: `<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14.88 16.29L13 18.17v-3.76l1.88 1.88M13 5.83l1.88 1.88L13 9.59V5.83m4.71 1.88L12 2h-1v7.59L6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 11 14.41V22h1l5.71-5.71-4.3-4.29 4.3-4.29z"/></svg>`,
-      title: "土豆片", position: "right", callback: () => this.openPanel(),
+    this.setting.addItem({
+      title: "数据目录（不参与思源同步）",
+      description: this.stateDir,
+      createActionElement: () => {
+        const btn = document.createElement("button");
+        btn.className = "b3-button b3-button--outline";
+        btn.textContent = "打开目录";
+        btn.addEventListener("click", () => this.openStateDir());
+        return btn;
+      },
     });
-    this.ipc = window.require?.("electron")?.ipcRenderer ?? null;
-    if (this.ipc) this.ipc.on("siyuan-save-close", this.onIpcExit);
-    window.addEventListener("beforeunload", this.onBeforeUnload);
-    const stale = this.lifecycle.detectStale();
-    if (stale) showMessage(`检测到残留土豆片核心进程 (PID ${stale})，可在控制台停止或接管`, 6000, "info");
+
+    this.service.init().catch((e) => showMessage(`初始化失败：${String(e)}`, 6000, "error"));
   }
 
-  private rebuild() {
+  /**
+   * 目录放在工作区根下的 `todoocard/`（`data/` 的上一级），思源同步只覆盖 data，
+   * 因此核心、设备备注、配对记录都不会被云端旧副本覆盖。
+   */
+  private computeStateDir(): string {
+    const override = process.env.SIYUAN_TODOCARD_HOME;
+    if (override) return override;
     const dataDir = window.siyuan?.config?.system?.dataDir || "";
-    const pluginDir = path.join(dataDir, "plugins", this.name);
-    const coreDir = this.settings.coreDir || defaultCoreDir(dataDir);
-    this.store = new CoreStore(coreDir);
-    const platform = process.platform;
-    const ctx: LaunchCtx = {
-      python: pythonExe(coreDir, platform), serverPy: this.store.paths.serverPy,
-      einkDir: this.store.paths.eink, coreDir, port: this.settings.port, platform,
-      pidFile: this.store.paths.pidFile, logFile: this.store.paths.logFile,
-      probePy: path.join(pluginDir, "probe", "probe.py"),
-      disclaimPy: path.join(pluginDir, "probe", "disclaim_spawn.py"),
-      terminalTpl: path.join(pluginDir, "probe", "terminal.command.tpl"),
-    };
-    this.lifecycle = new CoreLifecycle({ store: this.store, ctx, setting: this.settings.launch, platform });
+    let userData = "";
+    try {
+      userData = window.require?.("@electron/remote")?.app?.getPath?.("userData") || "";
+    } catch {}
+    return resolveStateDir({ dataDir, userData });
   }
 
-  private log(msg: string) { this.logText += `[${new Date().toLocaleTimeString()}] ${msg}\n`; this.panel?.$set({ log: this.logText }); }
+  private saveSettings() {
+    const patch: { sourceUrl?: string; autoProbeAfterPair?: boolean } = {};
+    if (this.settingSource) patch.sourceUrl = this.settingSource.value;
+    if (this.settingAutoProbe) patch.autoProbeAfterPair = this.settingAutoProbe.checked;
+    this.service.updateSettings(patch);
+    this.refresh();
+    showMessage("设置已保存到同步范围之外的目录", 3000, "info");
+  }
 
   private openPanel() {
-    this.panel?.$destroy(); this.dialog?.destroy();
-    this.dialog = new Dialog({ title: "土豆片控制台", width: "720px", height: "560px", content: `<div id="tcMount"></div>` });
+    // 用户可能用右上角关闭面板；Dialog 关闭后插件侧不能继续持有失效引用，
+    // 否则再次点顶栏时会被 `if (this.dialog && this.panel)` 挡在门外。
+    if (this.dialog && this.panel && this.dialog.element?.isConnected) {
+      try { (this.dialog.element.querySelector(".tc-app") as HTMLElement)?.focus(); } catch {}
+      return;
+    }
+    this.panel?.$destroy();
+    this.dialog?.destroy();
+    this.panel = null;
+    this.dialog = null;
+    this.dialog = new Dialog({
+      title: "土豆片 · TodooCard",
+      width: "940px",
+      height: "740px",
+      content: `<div id="tcMount" style="display:flex;height:100%;min-height:560px;flex-direction:column;"></div>`,
+      destroyCallback: () => {
+        this.panel?.$destroy();
+        this.panel = null;
+        this.dialog = null;
+      },
+    });
     const target = this.dialog.element.querySelector("#tcMount") as HTMLElement;
-    this.panel = new ControlPanel({ target, props: this.panelProps() });
-    this.panel.$on("install", () => this.doInstall());
-    this.panel.$on("start", () => this.doStart());
-    this.panel.$on("stop", () => this.doStop());
-    this.panel.$on("recheck", () => { this.store.setCachedMode(null); this.log("已清除模式缓存，下次启动重新预检"); });
-    this.panel.$on("openweb", () => this.openWeb());
-    this.panel.$on("opendir", async () => {
-      try {
-        const remote = window.require?.("@electron/remote");
-        if (!remote?.shell) { showMessage("当前环境不支持打开目录", 5000, "error"); return; }
-        const err = await remote.shell.openPath(this.store.coreDir);
-        if (err) { this.log("打开目录失败: " + err); showMessage(err, 5000, "error"); }
-      } catch (e) { this.log("打开目录失败: " + e); showMessage(String(e), 5000, "error"); }
+    this.panel = new App({ target, props: { view: this.service.getView() } });
+
+    this.panel.$on("install", () => this.service.install(true));
+    this.panel.$on("recheck", () => this.service.recheckPrereq());
+    this.panel.$on("scan", () => this.service.scanDevices());
+    this.panel.$on("stopscan", () => this.service.cancelJob());
+    this.panel.$on("cancel", () => this.service.cancelJob());
+    this.panel.$on("select", (e: CustomEvent) => this.service.selectDevice(e.detail));
+    this.panel.$on("pair", (e: CustomEvent) => this.service.pair(e.detail));
+    this.panel.$on("probe", (e: CustomEvent) => this.service.probe(e.detail));
+    this.panel.$on("forget", (e: CustomEvent) => this.service.forgetDevice(e.detail));
+    this.panel.$on("alias", (e: CustomEvent) => this.service.setAlias(e.detail.id, e.detail.alias));
+    this.panel.$on("filters", (e: CustomEvent) => this.service.setFilters(e.detail));
+    this.panel.$on("pickimage", () => this.pickImage());
+    this.panel.$on("paste", () => this.pasteFromClipboard());
+    this.panel.$on("dropimage", (e: CustomEvent) => {
+      this.service.setDroppedImage(Buffer.from(e.detail.bytes), e.detail.name).catch((err) => showMessage(String(err), 5000, "error"));
     });
-    this.panel.$on("changedir", async () => {
-      try {
-        const remote = window.require?.("@electron/remote");
-        if (!remote?.dialog) { showMessage("当前环境不支持目录选择", 5000, "error"); return; }
-        const r = await remote.dialog.showOpenDialog({ title: "选择土豆片核心存储目录", properties: ["openDirectory", "createDirectory"] });
+    this.panel.$on("clearimage", () => this.service.clearImage());
+    this.panel.$on("rotate", (e: CustomEvent) => this.service.setRotate(!!e.detail));
+    this.panel.$on("crop", () => this.service.invalidatePrepared());
+    this.panel.$on("prepare", (e: CustomEvent<{ bytes?: Uint8Array; name?: string } | undefined>) => {
+      const detail = e.detail;
+      this.service.prepare(detail?.bytes?.length ? Buffer.from(detail.bytes) : null, detail?.name);
+    });
+    this.panel.$on("send", (e: CustomEvent<string[] | undefined>) => this.service.send(e.detail));
+    this.panel.$on("settings", (e: CustomEvent) => this.service.updateSettings(e.detail));
+    this.panel.$on("clearLog", () => this.service.clearLog());
+    this.panel.$on("opendir", () => this.openStateDir());
+
+    this.pasteTarget = target;
+    target.addEventListener("paste", this.handlePaste, true);
+    setTimeout(() => (target.querySelector(".tc-app") as HTMLElement)?.focus(), 60);
+  }
+
+  private refresh() {
+    if (!this.panel) return;
+    try { this.panel.$set({ view: this.service.getView() }); } catch {}
+  }
+
+  private handlePaste = async (e: ClipboardEvent) => {
+    const data = e.clipboardData;
+    if (!data) return;
+    let file: File | null = null;
+    for (const item of Array.from(data.items || [])) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        file = item.getAsFile();
+        if (file) break;
+      }
+    }
+    if (!file && data.files?.length) {
+      const first = data.files[0];
+      if (first.type.startsWith("image/")) file = first;
+    }
+    if (file) {
+      e.preventDefault();
+      e.stopPropagation();
+      const bytes = Buffer.from(await file.arrayBuffer());
+      await this.service.setPastedPng(bytes);
+      return;
+    }
+    const text = data.getData("text/plain")?.trim();
+    if (text && isImageFile(text) && fs.existsSync(text)) {
+      e.preventDefault();
+      e.stopPropagation();
+      await this.service.setImage(text);
+    }
+  };
+
+  /** 从系统剪贴板取截图；Electron 的 clipboard 对 macOS 截图复制最可靠。 */
+  private readClipboardImage(): Buffer | null {
+    try {
+      const electron = window.require?.("electron");
+      const remote = window.require?.("@electron/remote");
+      const clipboard = electron?.clipboard || remote?.clipboard;
+      const image = clipboard?.readImage?.();
+      if (image && !image.isEmpty()) {
+        const png = image.toPNG();
+        if (png?.length) return Buffer.from(png);
+      }
+    } catch {}
+    return null;
+  }
+
+  private async pasteFromClipboard() {
+    const png = this.readClipboardImage();
+    if (png) {
+      await this.service.setPastedPng(png);
+      return;
+    }
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        for (const type of item.types) {
+          if (type.startsWith("image/")) {
+            const blob = await item.getType(type);
+            await this.service.setPastedPng(Buffer.from(await blob.arrayBuffer()));
+            return;
+          }
+        }
+      }
+    } catch {}
+    let text = "";
+    try {
+      const electron = window.require?.("electron");
+      const remote = window.require?.("@electron/remote");
+      const clipboard = electron?.clipboard || remote?.clipboard;
+      text = clipboard?.readText?.() || "";
+    } catch {}
+    if (text.trim() && isImageFile(text.trim()) && fs.existsSync(text.trim())) {
+      await this.service.setImage(text.trim());
+      return;
+    }
+    showMessage("剪贴板里没有图片。请先截屏（⌘⇧⌃4）或复制一张图片后再试。", 5000, "info");
+  }
+
+  private async pickImage() {
+    try {
+      const remote = window.require?.("@electron/remote");
+      if (remote?.dialog) {
+        const r = await remote.dialog.showOpenDialog({
+          title: "选择要发送到卡片的图片",
+          properties: ["openFile"],
+          filters: IMAGE_FILTER,
+        });
         if (r.canceled || !r.filePaths?.length) return;
-        if (this.running) { this.lifecycle.stop(); this.running = false; this.currentMode = ""; this.log("更改目录前已停止运行中的核心"); }
-        this.settings.coreDir = r.filePaths[0];
-        await this.saveData(STORAGE_NAME, this.settings);
-        this.rebuild(); this.refresh();
-        this.log("核心目录已设为 " + this.settings.coreDir);
-      } catch (e) { this.log("更改目录失败: " + e); showMessage(String(e), 5000, "error"); }
-    });
-    this.panel.$on("launch", (e: CustomEvent) => this.saveLaunch(e.detail));
-    this.panel.$on("port", (e: CustomEvent) => this.savePort(e.detail));
-    this.refresh();
+        await this.service.setImage(r.filePaths[0]);
+        return;
+      }
+    } catch {}
+    const manual = window.prompt?.("输入图片的本地路径：")?.trim();
+    if (manual) await this.service.setImage(manual);
   }
 
-  private panelProps() {
-    return { status: this.store.detect(), running: this.running, mode: this.currentMode, launch: this.settings.launch, port: this.settings.port, coreDir: this.store.coreDir, log: this.logText, isDarwin: process.platform === "darwin" };
-  }
-  private refresh() { this.panel?.$set(this.panelProps()); }
-
-  private async saveLaunch(v: string) {
-    this.settings.launch = normalizeLaunch(v);
-    try { await this.saveData(STORAGE_NAME, this.settings); }
-    catch (e) { this.log("保存启动方式失败: " + e); showMessage("保存设置失败，详见日志", 5000, "error"); }
-    this.rebuild(); this.refresh();
-  }
-
-  private async savePort(v: number) {
-    const port = Number.isFinite(v) && v >= 1 && v <= 65535 ? Math.floor(v) : 8199;
-    this.settings.port = port;
-    try { await this.saveData(STORAGE_NAME, this.settings); }
-    catch (e) { this.log("保存端口失败: " + e); showMessage("保存设置失败，详见日志", 5000, "error"); }
-    this.rebuild(); this.refresh();
-    this.log("核心端口已设为 " + port + "（重启核心后生效）");
-  }
-
-  private async doInstall() {
+  private async openStateDir() {
     try {
-      if (!this.settings.manifestUrl) { showMessage("请先在设置里填写 manifest URL", 5000, "error"); return; }
-      this.log("拉取 manifest…");
-      const text = await this.fetchText(this.settings.manifestUrl);
-      const m = parseManifest(text);
-      const key = platformKey(process.platform, process.arch);
-      const entry = selectPlatform(m, key);
-      const cur = this.store.readCoreJson();
-      // 旧 core.json 无 coreVersion → 视为 0.0.0 → 必更新，安装成功后写入 v2。
-      if (cur && compareVersion(coreVersionOf(cur), m.coreVersion) >= 0) { this.log("已是最新版本"); return; }
-      await installCore({
-        store: this.store, entry, version: m.version,
-        coreVersion: m.coreVersion, coreCommit: m.coreCommit,
-        manifestUrl: this.settings.manifestUrl,
-        platform: process.platform, arch: process.arch,
-        onProgress: (s) => this.log(s),
-      });
-      this.refresh();
-    } catch (e) { this.log("安装失败: " + e); showMessage("安装失败，详见日志", 5000, "error"); }
-  }
-
-  private async fetchText(url: string): Promise<string> {
-    if (url.startsWith("file://")) return fs.readFileSync(url.slice(7), "utf8");
-    return httpGetText(url);
-  }
-
-  private async doStart() {
-    try {
-      this.log("启动中（含 BLE 预检，若弹蓝牙授权请点允许）…");
-      const r = await this.lifecycle.start();
-      this.running = true; this.currentMode = r.mode;
-      this.log(`已启动，模式=${r.mode} PID=${r.pid}`);
-      this.refresh();
-    } catch (e) { this.log("启动失败: " + e); showMessage(String(e), 6000, "error"); }
-  }
-
-  private doStop() { this.lifecycle.stop(); this.running = false; this.currentMode = ""; this.log("已停止"); this.refresh(); }
-
-  private openWeb() {
-    const url = `http://127.0.0.1:${this.settings.port}`;
-    openTab({ app: this.app, custom: { id: this.name + "todoocard-web", title: "土豆片传图", icon: "iconImage", data: { url } } });
+      const remote = window.require?.("@electron/remote");
+      if (remote?.shell?.openPath) {
+        const err = await remote.shell.openPath(this.stateDir);
+        if (err) showMessage(`打开目录失败：${err}`, 5000, "error");
+        return;
+      }
+    } catch {}
+    showMessage(`数据目录：${this.stateDir}`, 7000, "info");
   }
 
   onunload() {
-    this.lifecycle?.stop();
-    window.removeEventListener("beforeunload", this.onBeforeUnload);
-    if (this.ipc) this.ipc.removeListener("siyuan-save-close", this.onIpcExit);
-    this.panel?.$destroy(); this.dialog?.destroy();
+    try { this.pasteTarget?.removeEventListener("paste", this.handlePaste, true); } catch {}
+    this.service?.dispose();
+    this.panel?.$destroy();
+    this.dialog?.destroy();
+    this.panel = null;
+    this.dialog = null;
   }
 }

@@ -1,71 +1,98 @@
 # plugin-todoocard
 
-SiYuan desktop plugin that manages a local TodooCard e-ink core.
+思源笔记（SiYuan）桌面插件：在思源里扫描、配对、筛选 TodooCard 墨水屏卡片，并把图片/截图发送到卡片。
 
-## Phase 1 scope
+发送与图像转换全部复用上游 [Sunbelife/TodooCard_Skills](https://github.com/Sunbelife/TodooCard_Skills)，本插件只负责：
 
-- Core management: install / update the local TodooCard core from a maintainer-provided manifest (SHA-256 verified).
-- Launch cascade: ① direct → ② disclaim → ④ Terminal, with automatic fallback when a mode fails.
-- Control console inside SiYuan: core status, launch mode selection, port and core directory settings.
-- Image transfer is done via the core's own Web UI (default port `8199`); this plugin does not implement a transfer UI in Phase 1.
+- 下载并校验上游 Skill（默认钉死 commit，需手动点一次下载）
+- 把 Skill 的文本命令包装成思源内的操作面板
+- 设备扫描、多设备筛选、备注名与配对状态记录
+- 图片选择 / Finder 拖入 / 剪贴板截图粘贴
+- 生成 `.bin` 并预览卡片六色效果
+- 调用上游完成配对、探测与发送
 
-Supported: Windows, Linux, macOS (desktop frontends only, SiYuan ≥ 3.0.1).
-
-## 分发模型（v2）
-
-核心源码与便携 Python **直接引用上游**，我们不再分发 fork 全量包：
-
-| 资产 | 来源 |
-| --- | --- |
-| 上游源码 tarball（松散 `.py`） | `shidaifufen/todoocard-eink` 的 **commit sha**（`archive/<sha>.tar.gz`） |
-| 便携 Python | astral-sh `python-build-standalone` 官方 `install_only` |
-| 版本匹配扩展包（`apply.py` + `extension.json`） | 独立仓库 `Gt841/todoocard-core-dist` 的 GitHub Releases |
-| `manifest.json`（v2） | 同一仓库的 GitHub Pages |
-
-安装流程：读 manifest → 三资产下载 + 逐个 sha256 校验 → 解压归一化（剥 `todoocard-eink-<sha>/` 与 `python/` 顶层）→ 便携 Python 跑 `pip install -r requirements.txt` → 跑 `apply.py` 注入必要改动 → 原子替换 → 写 `core.json`（含 `coreVersion` / `coreCommit`）。任一步失败即中止，旧核心完好。
-
-`apply.py` 用**锚点断言 + 幂等 + 编译校验**守住版本匹配：上游源码漂移（锚点消失/变形/多处）或 `coreVersion`/`coreCommit` 不符 → 非 0 退出，控制台提示「上游版本可能已漂移」，维护者重基扩展包。
-
-> 当前状态（2026-11-12）：**dist 已上线**——仓库 `Gt841/todoocard-core-dist`、Release `v1.0.11`、Pages manifest 均已发布，插件默认 `manifestUrl` 已指向 `https://gt841.github.io/todoocard-core-dist/manifest.json`（可在设置里覆盖）。线上三资产 sha 与全链路（含 pip、apply.py、py_compile）已复核通过。
+> 仅支持 macOS 桌面端（上游 Swift CLI 依赖 CoreBluetooth 与 `swiftc`）。Windows / Linux 暂不支持；待上游提供可用的 Windows 核心后再评估。
 >
-> **hotfix（manifest `2.0.1`）**：首次真机发送暴露 macOS CoreBluetooth 带响应写会永久挂起，已由 dist 的 `hotfixes/v1.0.11.json` 加 8s 超时修复。**已装过核心的用户必须点控制台「强制重装」**（`coreVersion` 仍是 `1.0.11`，按版本比较不会自动触发）。**仍待人工**：真机 BLE 全流程验证、插件集市发版。
+> 插件代码以 MIT 许可证开源；上游 Skill 不随本仓库或 `package.zip` 分发，只在用户本机按需下载。
 
-## macOS pairing note
+## 功能
 
-Pair the TodooCard device in **System Settings → Bluetooth** first, before launching the core from this plugin.
+- **设备**：扫描附近 BLE 设备；默认只显示 TodooCard 兼容设备（manufacturer `0x5053` + screen `0x134C`），可关闭「仅兼容」查看全部；支持按信号/名称排序、搜索、配对窗口筛选、已配对筛选。
+- **配对**：按设备 UUID 记录备注名和配对时间；配对前提示长按卡片背面按钮（新固件 5 秒 / 旧固件 10 秒），配对窗口最长 60 秒；可自动探测验证加密连接并读取电量。
+- **图片**：选择 JPG/PNG/HEIC/TIFF/BMP/WebP；拖入图片；直接粘贴截图（⌘V 或「粘贴截图」）；可向右旋转 90°。
+- **生成与预览**：调用上游转换，展示 v157+ / legacy payload 大小，并把 528×792 的 4bit 位图解码为六色预览。
+- **发送**：目标设备、图片、校验结果分步确认；只有收到卡片的 `0x05/0x08` 刷新确认才视为发送成功。
 
-详细步骤（中文）见 [docs/macos-pairing.md](docs/macos-pairing.md)：macOS 纯 Python 模式的配对、扫描发送与 bleak 排障。
+## 环境要求
 
-## 维护者托管 / Maintainer hosting
+- macOS（Apple Silicon / Intel）
+- SiYuan ≥ 3.0.1，桌面端
+- Xcode Command Line Tools（提供 `swiftc`）：`xcode-select --install`
+- `python3` 与系统 `/usr/bin/sips`
+- 首次扫描时允许思源使用蓝牙（系统设置 → 隐私与安全性 → 蓝牙）
 
-普通用户无需执行本节。**上游更新只动 dist 仓库，本插件仓库零改动。**
+## 使用
 
-1. **扩展包与 manifest 在独立仓库**：`Gt841/todoocard-core-dist`（本地路径 `../todoocard-core-dist`）。目录、脚本、锚点清单与上游更新工作流见其 [README](../todoocard-core-dist/README.md) 与 [docs/maintainer.md](../todoocard-core-dist/docs/maintainer.md)。
-2. **发布资产**：`bash scripts/build-extension.sh` 生成 `dist/extension-<ver>.zip`；`REFRESH=1 bash scripts/build-manifest.sh` 复算三资产 sha256 并生成 `manifest.json`；`bash scripts/verify.sh` 做无 BLE 端到端验证。
-3. **托管**：`manifest.json` → GitHub Pages（如 `https://gt841.github.io/todoocard-core-dist/manifest.json`）；扩展 zip → GitHub Release `v<ver>`。**源码 tarball 与便携 Python 只引用上游 URL，不托管、不再分发。**
-4. **版本钉死**：manifest 用 `coreCommit`（40 位 sha）拼 `sourceUrl`，用 `sourceSha256` 锁字节；`coreTag`（如 `v1.0.11-macos`）**仅作展示/追溯**——上游没有裸 `v1.0.11` tag。发布前务必 `REFRESH=1` 复算 sha（GitHub archive 字节可能随服务端重新生成而变化）。
-5. **插件设置**：`src/settings.ts` 的 `DEFAULT_SETTINGS.manifestUrl` 已默认指向上述 Pages 地址（`DIST_MANIFEST_URL`），**普通用户无需手填**；需要自建源时在思源「设置 → 集市 → 已下载 → 本插件」的 **Manifest URL** 覆盖（本地开发可用 `file://`）。控制台「安装/更新」是手动触发，比较 `core.json.coreVersion` 与 `manifest.coreVersion`；旧 `core.json` 缺该字段视为 `0.0.0`，会自动重装迁移到 v2。
+1. 安装并启用插件，点击顶部栏「土豆片 · TodooCard」图标。
+2. 首次使用在引导页点击 **下载核心**。插件会从默认钉死的 commit 下载上游源码 tarball，校验 SHA-256 后解压到数据目录。
+3. 切到 **设备**，点击 **扫描设备**，等待约 30 秒；在设备列表里选中卡片。
+4. 首次连接：点 **配对**，按提示长按卡片背面按钮，等 macOS 弹出蓝牙配对提示时允许。已配对设备即使当前未被扫描到，也可以直接 **探测** 或按 UUID 发送。
+5. 切到 **图片**：选择/拖入图片，或直接粘贴截图；调整 2:3 取景框，点 **生成预览**，确认六色效果。
+6. 在图片页下方勾选目标卡片（支持多选），点 **发送到卡片** / **发送到 N 台卡片**，核对清单后确认发送。
 
-`fork-patch/*.patch` 与 `scripts/dev-kit.sh` 是 Phase 1 的旧 fork 分发工具，**已作废**（见 `fork-patch/README.md`），其有用逻辑已重基为 dist 仓库的 `apply.py`。
+配对与发送都需要卡片在附近并保持唤醒。扫描只列出兼容设备；配对窗口关闭时，需先长按卡片按钮进入配对模式。
 
-## 平台说明 / Platform notes
+## 数据目录（不参与思源同步）
 
-Windows/Linux：核心 Web UI 的「扫描附近设备」按钮依赖 macOS Swift 工具，在这两个平台不可用；但发送仍可用——`sender.py` 在未绑定设备时按名字自动发现卡片。macOS 纯 Python 模式扫描/发送均可用（见 [docs/macos-pairing.md](docs/macos-pairing.md)）。控制台「端口」可改核心 Web UI 端口（默认 8199）。
+默认：
 
-## 安全 / Security
+```text
+~/Library/Application Support/SiYuan/todoocard/
+├── state.json        # 设置、设备备注、配对记录、上次选择
+├── skill/            # 上游 Skill 副本（可重新下载覆盖）
+├── skill-meta.json   # 来源、commit、SHA-256、安装时间
+├── tmp/              # 下载/解压临时目录
+├── cache/            # HEIC 等预览缓存
+└── legacy/           # 旧版插件设备备注备份（如有）
+```
 
-核心 Web UI（`card.html` 及 `/api/card/*`）**无鉴权**：能访问该端口的人都能向卡片发图、读取卡片状态。上游默认绑 `0.0.0.0`（所有网卡），`apply.py` 注入的改动已改为**默认仅绑 `127.0.0.1`**，因此只有本机能访问——思源内嵌的传图页签走的正是 `127.0.0.1`，功能不受影响。
+该目录位于思源工作区 `data/` 的上一级，不在思源同步范围内；插件不使用 `saveData` / petal 存储，因此插件信息与配对信息不会被云端旧副本覆盖。
 
-如需用手机/其他设备经局域网访问传图界面，在启动思源的环境里设 `HOST=0.0.0.0`（核心继承思源进程的环境变量）。**这会重新把无鉴权界面暴露到整个局域网**，请仅在可信网络下使用。macOS 从 Finder 启动的思源不继承 shell 环境，可用 `launchctl setenv HOST 0.0.0.0` 后重启思源。端口可在控制台「端口」修改（默认 8199）。
+调试时可用环境变量 `SIYUAN_TODOCARD_HOME` 覆盖数据目录（测试用）。
 
-## Development
+## 上游版本策略
+
+- 默认来源：`https://github.com/Sunbelife/TodooCard_Skills/commit/81f61e10c60ff0e7199749c67d090bb74252fd66`
+- **不会自动跟随 `main`**，也不会自动下载；必须点一次「下载 / 更新核心」。
+- 更新上游：在「设置 → 核心来源」把地址改成新的 commit 或 `main`，保存后点「下载 / 更新核心」。
+- 上游仓库没有 LICENSE，本插件**不重新分发**上游源码；只在用户本机按需下载。
+- 下载后记录 tarball SHA-256 和解压出来的目录名（如 `TodooCard_Skills-<sha>`），便于追溯。
+
+## 开发
 
 ```bash
 npm install
-npm test          # vitest
-npm run build     # emits dist/ and package.zip
-npm run make-link # symlink dev build into your SiYuan plugins dir
-npm run dev       # watch build into the SiYuan plugins dir
+npm test          # vitest：解析、状态存储、路径、Skill 安装、图片校验、payload 预览
+npm run build     # 生成 dist/ 与 package.zip
+npm run make-link # 把开发构建软链到思源插件目录
+npm run dev       # watch 构建到思源插件目录
 ```
 
-设计与实现计划见 `docs/superpowers/specs/2026-11-12-upstream-core-extension-design.md` 与 `docs/superpowers/plans/2026-11-12-upstream-core-extension.md`。
+构建后手动安装：
+
+```bash
+unzip -o package.zip -d "$HOME/Library/Application Support/SiYuan/data/plugins/plugin-todoocard"
+```
+
+## 已完成的真机验证
+
+- 单元测试 51/51 通过；生产构建通过。
+- 在 SiYuan 3.8.10（macOS）中安装并加载，顶部栏入口、引导页与 **图片 / 设备 / 设置** 三页签正常；默认打开图片页。
+- 首次点击下载：从钉死 commit 下载成功，`skill-meta.json` 记录的 ref 与 SHA-256 正确，数据目录为 `~/Library/Application Support/SiYuan/todoocard`，不参与思源同步。
+- 真实 BLE 扫描：一次扫描发现 36 台设备，其中 2 台 TodooCard 兼容设备（`519D2FA1…` / `C3B1E61E…`）；备注名持久化、多设备切换正常。
+- 剪贴板截图粘贴、2:3 取景、上游转换与 528×792 六色 payload 预览正常；模拟 10 台已配对设备时，图片页高度不随列表增长，发送按钮始终可见。
+- 提示统一为面板内浮层（toast）：未选图片、未生成预览、未选目标时不会拉长页面。
+- 已配对但当前未扫描到的设备可直接 **探测**；配对仍要求设备处于扫描/配对窗口内。
+- 未配对时探测/发送会返回上游的明确错误（`The secure bond is unavailable` / `Disconnected`），不会被误报为成功。
+
+完整配对与发送仍需在卡片上长按物理按钮并允许 macOS 蓝牙配对提示；这是上游协议要求，插件不会绕过。

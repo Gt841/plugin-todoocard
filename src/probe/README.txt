@@ -1,1 +1,0 @@
-BLE probe and macOS launch helpers are added in Tasks 5 and 7.
