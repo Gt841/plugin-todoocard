@@ -4,6 +4,7 @@
   import { PANEL_HEIGHT, PANEL_WIDTH } from "../types";
   import { decodePayloadBin } from "../core/preview";
   import { computeCropGeometry, panCropCenter } from "../core/crop";
+  import { MIRROR_PRESETS } from "../core/mirror";
 
   export let view: PanelView;
   const dispatch = createEventDispatcher();
@@ -46,6 +47,11 @@
   let cropDrawQueued = false;
   let cropInvalidateTimer: ReturnType<typeof setTimeout> | null = null;
   let lastRotate = false;
+  let envReady = false;
+  let canInstallCore = false;
+
+  $: envReady = view.prereq.checked && view.prereq.errors.length === 0;
+  $: canInstallCore = envReady && !view.job.running;
 
   const PALETTE: Record<number, [number, number, number]> = {
     0: [23, 23, 23],
@@ -63,7 +69,7 @@
   });
 
   $: if (view.image) toastedNoImage = false;
-  $: if (tab === "image" && !view.image && !toastedNoImage) {
+  $: if (view.skill.installed && tab === "image" && !view.image && !toastedNoImage) {
     toastedNoImage = true;
     showToast("尚未选择图片：拖入、粘贴截图，或点「选择图片」");
   }
@@ -436,6 +442,14 @@
     dispatch("settings", { autoProbeAfterPair: (e.currentTarget as HTMLInputElement).checked });
   }
 
+  function onMirror(e: Event) {
+    dispatch("settings", { downloadMirror: (e.currentTarget as HTMLSelectElement).value });
+  }
+
+  function installEnvironment() {
+    dispatch("installenv");
+  }
+
   function saveAlias() {
     if (!view.selected) return;
     dispatch("alias", { id: view.selected.id, alias: aliasDraft });
@@ -476,7 +490,8 @@
           {#if view.skill.installed}
             <span class="dot ok"></span>核心就绪
             <span class="sep">·</span>
-            <button class="link" on:click={() => dispatch("install")} disabled={view.job.running}>重新下载</button>
+            <button class="link" on:click={() => dispatch("install")} disabled={!canInstallCore}
+              title={canInstallCore ? "重新下载核心" : "请先在环境检查中完成运行环境安装"}>重新下载</button>
           {:else}
             <span class="dot warn"></span>核心未安装
           {/if}
@@ -525,21 +540,48 @@
             <span class="check-dot"></span>macOS
           </div>
         </div>
+        {#if !view.prereq.checked}
+          <p class="fineprint">正在检查运行环境…</p>
+        {/if}
         {#if view.prereq.errors.length}
           <ul class="errors">
             {#each view.prereq.errors as err}<li>{err}</li>{/each}
           </ul>
         {/if}
+        {#if view.envInstalling}
+          <p class="fineprint">正在等待系统安装完成，插件会自动复查…</p>
+        {/if}
+        {#if !envReady && view.platform === "darwin"}
+          <div class="env-actions">
+            <button class="b3-button b3-button--outline accent" on:click={installEnvironment}
+              disabled={view.envInstalling || view.job.running}>
+              {view.envInstalling ? "等待安装完成…" : "一键安装运行环境"}
+            </button>
+            <button class="b3-button b3-button--outline small" on:click={() => dispatch("recheck")}
+              disabled={view.job.running}>重新检查</button>
+          </div>
+          <p class="fineprint">会打开 macOS 的 Xcode Command Line Tools 安装窗口，仍需在系统弹窗中确认。</p>
+        {/if}
         <div class="source-line">
           <span>下载源</span>
           <input class="b3-text-field" bind:value={sourceDraft} spellcheck="false" />
         </div>
+        <div class="source-line">
+          <span>下载线路</span>
+          <select class="b3-select" value={view.settings.downloadMirror} on:change={onMirror}>
+            {#each MIRROR_PRESETS as m}<option value={m.value}>{m.label}</option>{/each}
+          </select>
+        </div>
+        <p class="fineprint">国内网络较慢或无法访问 GitHub 时可选择第三方加速；安装包仍会用钉死的 SHA-256 校验。</p>
         <div class="onboard-actions">
           <button class="b3-button b3-button--text small" on:click={saveSource} disabled={view.job.running}>保存源</button>
-          <button class="b3-button b3-button--outline" on:click={() => dispatch("install")} disabled={view.job.running}>
+          <button class="b3-button b3-button--outline" on:click={() => dispatch("install")} disabled={!canInstallCore}>
             下载核心
           </button>
         </div>
+        {#if !envReady}
+          <p class="fineprint">核心下载已锁定：请先完成上方运行环境检查与安装。</p>
+        {/if}
         <p class="fineprint">下载与安装只写本地目录；插件与配对信息不会进入思源数据同步。</p>
       </div>
     </div>
@@ -819,7 +861,7 @@
                     <button type="button" class="target-row" class:selected={targetIds.includes(d.id)}
                       aria-pressed={targetIds.includes(d.id)} disabled={view.job.running}
                       on:click={() => toggleTarget(d.id)}>
-                      <span class="check" class:on={targetIds.includes(d.id)} aria-hidden="true">✓</span>
+                      <span class="target-check" class:on={targetIds.includes(d.id)} aria-hidden="true">✓</span>
                       <span class="target-main">
                         <span class="target-name">
                           {nameOf(d)}
@@ -851,6 +893,13 @@
               <input class="b3-text-field" bind:value={sourceDraft} spellcheck="false" />
               <button class="b3-button b3-button--outline small" on:click={saveSource} disabled={view.job.running}>保存</button>
             </div>
+            <div class="source-line">
+              <span>下载线路</span>
+              <select class="b3-select" value={view.settings.downloadMirror} on:change={onMirror}>
+                {#each MIRROR_PRESETS as m}<option value={m.value}>{m.label}</option>{/each}
+              </select>
+            </div>
+            <p class="fineprint">第三方加速仅改变下载地址；默认钉死来源的包会用固定 SHA-256 校验，不匹配就拒绝安装。</p>
             <div class="kv">
               <span>已安装</span>
               <span>{view.skill.installed ? (view.skill.ref || "已安装") : "未安装"}</span>
@@ -861,7 +910,11 @@
             {#if view.skill.installedAt}
               <div class="kv"><span>安装时间</span><span>{fmtTime(view.skill.installedAt)}</span></div>
             {/if}
-            <button class="b3-button b3-button--outline accent" on:click={() => dispatch("install")} disabled={view.job.running}>下载 / 更新核心</button>
+            <button class="b3-button b3-button--outline accent" on:click={() => dispatch("install")} disabled={!canInstallCore}
+              title={canInstallCore ? "下载 / 更新核心" : "请先完成运行环境检查与安装"}>下载 / 更新核心</button>
+            {#if !envReady}
+              <p class="fineprint">核心下载已锁定：请先在下方「环境」中完成检查与安装。</p>
+            {/if}
           </section>
 
           <section>
@@ -879,10 +932,27 @@
               <div class:ok={view.prereq.sips} class="check"><span class="check-dot"></span>sips</div>
               <div class:ok={view.platform === "darwin"} class="check"><span class="check-dot"></span>macOS</div>
             </div>
+            {#if !view.prereq.checked}
+              <p class="fineprint">正在检查运行环境…</p>
+            {/if}
             {#if view.prereq.errors.length}
               <ul class="errors">{#each view.prereq.errors as err}<li>{err}</li>{/each}</ul>
             {/if}
-            <button class="b3-button b3-button--outline small" on:click={() => dispatch("recheck")} disabled={view.job.running}>重新检查</button>
+            {#if view.envInstalling}
+              <p class="fineprint">正在等待系统安装完成，插件会自动复查…</p>
+            {/if}
+            <div class="env-actions">
+              {#if !envReady && view.platform === "darwin"}
+                <button class="b3-button b3-button--outline accent" on:click={installEnvironment}
+                  disabled={view.envInstalling || view.job.running}>
+                  {view.envInstalling ? "等待安装完成…" : "一键安装运行环境"}
+                </button>
+              {/if}
+              <button class="b3-button b3-button--outline small" on:click={() => dispatch("recheck")} disabled={view.job.running}>重新检查</button>
+            </div>
+            {#if !envReady && view.platform === "darwin"}
+              <p class="fineprint">会打开 macOS 的 Xcode Command Line Tools 安装窗口，需在系统弹窗中确认。</p>
+            {/if}
           </section>
 
           <section>
@@ -1031,6 +1101,8 @@
   .source-line { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
   .source-line span { font-size: 12px; opacity: 0.7; white-space: nowrap; }
   .source-line input { flex: 1; font-size: 12px; }
+  .source-line select { flex: 1; min-width: 190px; font-size: 12px; }
+  .env-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 6px; }
   .onboard-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
   .fineprint { font-size: 11px; opacity: 0.55; line-height: 1.5; }
   .prereq-warn {
@@ -1203,12 +1275,12 @@
     background: color-mix(in srgb, var(--tc-accent) 8%, var(--b3-theme-background));
   }
   .target-row:disabled { opacity: 0.6; cursor: default; }
-  .check {
+  .target-check {
     width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--b3-border-color);
     display: flex; align-items: center; justify-content: center; font-size: 11px;
     color: transparent; flex: none;
   }
-  .check.on { background: var(--tc-accent); border-color: var(--tc-accent); color: #fff; }
+  .target-check.on { background: var(--tc-accent); border-color: var(--tc-accent); color: #fff; }
   .target-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .target-name {
     display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600;

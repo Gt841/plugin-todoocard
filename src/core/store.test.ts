@@ -30,6 +30,7 @@ describe("默认配置", () => {
     expect(PINNED_COMMIT).toMatch(/^[0-9a-f]{40}$/);
     expect(DEFAULT_SOURCE_URL).toContain(`/commit/${PINNED_COMMIT}`);
     expect(DEFAULT_SETTINGS.sourceUrl).toBe(DEFAULT_SOURCE_URL);
+    expect(DEFAULT_SETTINGS.downloadMirror).toBe("");
   });
 });
 
@@ -46,6 +47,14 @@ describe("normalizeState", () => {
     expect(state.devices.bad).toBeUndefined();
     expect(state.settings.sourceUrl).toBe("https://github.com/a/b");
     expect(state.settings.autoProbeAfterPair).toBe(true);
+  });
+
+  it("下载线路保留合法前缀并去掉首尾空白", () => {
+    const state = normalizeState({
+      settings: { downloadMirror: "  https://gh-proxy.com/  " },
+    });
+    expect(state.settings.downloadMirror).toBe("https://gh-proxy.com/");
+    expect(normalizeState({}).settings.downloadMirror).toBe("");
   });
 
   it("空来源回退到默认地址", () => {

@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { StateStore, displayName } from "./store";
 import { checkPrerequisites, detectSkill, installSkill } from "./skill";
+import { runSpawn } from "./fsutil";
 import { SkillRunner } from "./runner";
 import { classifyOutcome, parsePreparedPaths, parseScanLine, isUuid, type JobOutcome } from "./parse";
 import { normalizeSendTargets, summarizeBatch, type SendTargetResult } from "./batch";
@@ -66,7 +67,12 @@ export class TodooService {
   private cancelRequested = false;
   private scanTimer: ReturnType<typeof setInterval> | null = null;
   private updateTimer: ReturnType<typeof setTimeout> | null = null;
+  private envTimer: ReturnType<typeof setInterval> | null = null;
+  private envDeadline = 0;
   private disposed = false;
+
+  /** 已拉起系统命令行工具安装器，正在轮询复查。 */
+  envInstalling = false;
 
   constructor(opts: ServiceOptions) {
     this.stateDir = opts.stateDir;
@@ -103,6 +109,7 @@ export class TodooService {
     this.runner?.cancel();
     if (this.scanTimer) clearInterval(this.scanTimer);
     if (this.updateTimer) clearTimeout(this.updateTimer);
+    this.stopEnvPoll();
   }
 
   private push() {
@@ -202,6 +209,7 @@ export class TodooService {
       stateDir: this.stateDir,
       skill: this.skill,
       prereq: this.prereq,
+      envInstalling: this.envInstalling,
       devices: filtered,
       pairedDevices,
       selected: rows.find((d) => d.id === this.selectedId) || null,
@@ -226,14 +234,21 @@ export class TodooService {
       if (manual) this.notify("有操作进行中，请稍后再试", "info");
       return;
     }
+    if (!(await this.ensureEnvironment(manual))) return;
+    if (this.job.running) {
+      if (manual) this.notify("有操作进行中，请稍后再试", "info");
+      return;
+    }
     this.job = { kind: "install", running: true, message: "正在下载上游 Skill…", startedAt: Date.now(), canCancel: false };
     this.log("── 下载核心（TodooCard_Skills）──");
     this.push();
     try {
       const source = this.store.settings.sourceUrl;
+      const mirror = this.store.settings.downloadMirror;
       const meta = await installSkill({
         stateDir: this.stateDir,
         sourceUrl: source,
+        mirror,
         onProgress: (m) => this.log(m),
       });
       this.skill = detectSkill(this.stateDir, source);
@@ -241,9 +256,6 @@ export class TodooService {
       this.store.updateSettings({ sourceUrl: source });
       this.log(`核心已安装：${meta.ref || meta.archiveUrl}（${meta.sha256.slice(0, 10)}…）`);
       if (manual) this.notify("核心下载完成", "info");
-      if (this.prereq.checked && this.prereq.errors.length) {
-        this.log("提示：环境检查存在问题，操作仍可能失败");
-      }
     } catch (e) {
       this.log(`下载失败：${String(e)}`);
       this.notify(`核心下载失败：${String(e)}`, "error");
@@ -253,9 +265,103 @@ export class TodooService {
     }
   }
 
+  /** 首次安装核心前的硬门槛：环境必须检查过且没有错误。 */
+  private async ensureEnvironment(manual: boolean): Promise<boolean> {
+    if (!this.prereq.checked) this.prereq = await checkPrerequisites();
+    if (!this.prereq.errors.length) return true;
+    this.log("安装核心已阻止：运行环境未就绪");
+    for (const err of this.prereq.errors) this.log(`环境检查：${err}`);
+    if (manual) this.notify("请先完成运行环境检查与安装，再下载核心", "error");
+    this.push();
+    return false;
+  }
+
   async recheckPrereq(): Promise<void> {
     this.prereq = await checkPrerequisites();
+    this.envInstalling = false;
+    this.stopEnvPoll();
     this.log(this.prereq.errors.length ? `环境检查：${this.prereq.errors.join("；")}` : "环境检查通过");
+    this.push();
+  }
+
+  /**
+   * 一键拉起 macOS 的 Xcode Command Line Tools 安装器。系统安装窗口需要用户确认，
+   * 不能完全静默；拉起后每 4 秒自动复查一次，最多等待 10 分钟。
+   */
+  async installEnvironment(): Promise<void> {
+    if (this.platform !== "darwin") {
+      this.notify("当前系统不是 macOS，无法自动安装运行环境", "error");
+      return;
+    }
+    if (this.envInstalling) return;
+    this.envInstalling = true;
+    this.push();
+    if (!this.prereq.checked) this.prereq = await checkPrerequisites();
+    if (!this.prereq.errors.length) {
+      this.envInstalling = false;
+      this.notify("运行环境已就绪", "info");
+      this.push();
+      return;
+    }
+    this.log("── 安装运行环境（Xcode Command Line Tools）──");
+    this.log("如弹出 macOS 安装窗口，请点击「安装」并等待完成；插件会自动复查。");
+    this.push();
+    let shouldPoll = true;
+    try {
+      const r = await runSpawn("/usr/bin/xcode-select", ["--install"], { timeoutMs: 20_000 });
+      const output = [r.stdout, r.stderr].map((s) => s.trim()).filter(Boolean).join("\n");
+      if (output) this.log(output);
+      if (r.timedOut) {
+        this.log("安装器未在 20 秒内返回；如果系统窗口已打开，请继续完成安装。");
+      } else if (r.code !== 0) {
+        if (/already installed/i.test(output)) {
+          this.log("Command Line Tools 已安装，正在等待环境生效…");
+        } else {
+          shouldPoll = false;
+          this.log("未能自动拉起安装器；可手动在终端执行：xcode-select --install");
+        }
+      }
+    } catch (e) {
+      shouldPoll = false;
+      this.log(`拉起安装器失败：${String(e)}`);
+      this.log("可手动在终端执行：xcode-select --install");
+    }
+    if (!shouldPoll) {
+      this.envInstalling = false;
+      this.log("完成手动安装后，点「重新检查」更新状态");
+      this.push();
+      return;
+    }
+    this.envDeadline = Date.now() + 10 * 60_000;
+    this.startEnvPoll();
+    this.push();
+  }
+
+  private startEnvPoll() {
+    this.stopEnvPoll();
+    this.envTimer = setInterval(() => { void this.pollEnvironment(); }, 4_000);
+  }
+
+  private stopEnvPoll() {
+    if (this.envTimer) clearInterval(this.envTimer);
+    this.envTimer = null;
+  }
+
+  private async pollEnvironment() {
+    if (this.disposed) return;
+    const prereq = await checkPrerequisites();
+    if (this.disposed) return;
+    this.prereq = prereq;
+    if (!prereq.errors.length) {
+      this.envInstalling = false;
+      this.stopEnvPoll();
+      this.log("环境检查通过，可以下载核心了");
+      this.notify("运行环境已就绪", "info");
+    } else if (Date.now() >= this.envDeadline) {
+      this.envInstalling = false;
+      this.stopEnvPoll();
+      this.log("等待环境安装超时；完成系统安装后点「重新检查」");
+    }
     this.push();
   }
 
@@ -639,9 +745,13 @@ export class TodooService {
 
   // ── 设置 / 工具 ──────────────────────────────────────────────
 
-  updateSettings(patch: { sourceUrl?: string; autoProbeAfterPair?: boolean }): void {
+  updateSettings(patch: { sourceUrl?: string; downloadMirror?: string; autoProbeAfterPair?: boolean }): void {
     const clean: Record<string, unknown> = {};
     if (typeof patch.sourceUrl === "string" && patch.sourceUrl.trim()) clean.sourceUrl = patch.sourceUrl.trim();
+    if (typeof patch.downloadMirror === "string") {
+      const mirror = patch.downloadMirror.trim();
+      clean.downloadMirror = !mirror || /^https?:\/\//i.test(mirror) ? mirror : "";
+    }
     if (typeof patch.autoProbeAfterPair === "boolean") clean.autoProbeAfterPair = patch.autoProbeAfterPair;
     this.store.updateSettings(clean);
     this.skill = detectSkill(this.stateDir, this.store.settings.sourceUrl);

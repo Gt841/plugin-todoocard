@@ -35,6 +35,8 @@ export interface SavedDevice {
 
 export interface Settings {
   sourceUrl: string;
+  /** 下载加速前缀，空字符串表示直连 GitHub。 */
+  downloadMirror: string;
   autoProbeAfterPair: boolean;
   rotateRight90: boolean;
 }
@@ -116,6 +118,8 @@ export interface PanelView {
   stateDir: string;
   skill: SkillView;
   prereq: PrereqView;
+  /** 已拉起命令行工具安装器，正在等待并自动复查。 */
+  envInstalling: boolean;
   devices: DeviceRow[];
   /** 全部已配对设备（不受设备页筛选影响），用于发送目标多选。 */
   pairedDevices: DeviceRow[];

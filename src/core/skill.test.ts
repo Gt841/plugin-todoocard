@@ -2,9 +2,10 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_SOURCE_URL, PINNED_COMMIT } from "./store";
+import { DEFAULT_SOURCE_URL, PINNED_COMMIT, PINNED_SHA256 } from "./store";
 import {
   detectSkill,
+  expectedSha256For,
   installSkill,
   normalizeSkillDir,
   readSkillMeta,
@@ -45,6 +46,16 @@ describe("sourceToArchiveUrl", () => {
   });
 });
 
+describe("expectedSha256For", () => {
+  it("默认钉死来源返回固定摘要，其他来源不强校验", () => {
+    expect(expectedSha256For(DEFAULT_SOURCE_URL)).toBe(PINNED_SHA256);
+    expect(expectedSha256For(`${DEFAULT_SOURCE_URL}/`)).toBe(PINNED_SHA256);
+    expect(expectedSha256For("https://github.com/Sunbelife/TodooCard_Skills")).toBeNull();
+    expect(expectedSha256For(`https://github.com/Sunbelife/TodooCard_Skills/tree/${PINNED_COMMIT}`)).toBeNull();
+    expect(expectedSha256For(`https://github.com/other/repo/commit/${PINNED_COMMIT}`)).toBeNull();
+  });
+});
+
 describe("normalizeSkillDir", () => {
   it("剥掉 GitHub tarball 顶层目录", () => {
     const root = tempDir();
@@ -66,11 +77,12 @@ describe("normalizeSkillDir", () => {
 });
 
 describe("installSkill", () => {
-  it("下载 → 校验 → 解压 → 原子替换 → 写 meta", async () => {
+  it("下载 → 解压 → 原子替换 → 写 meta", async () => {
     const stateDir = tempDir();
     const meta = await installSkill({
       stateDir,
       sourceUrl: DEFAULT_SOURCE_URL,
+      expectedSha256: null,
       downloader: async (_url, dest) => {
         fs.writeFileSync(dest, "fake-archive");
       },
@@ -83,6 +95,56 @@ describe("installSkill", () => {
     expect(fs.existsSync(path.join(stateDir, "skill", "todoocard-skills", "scripts", "prepare_and_send.sh"))).toBe(true);
     expect(readSkillMeta(stateDir)).toMatchObject({ sourceUrl: DEFAULT_SOURCE_URL, ref: meta.ref });
     expect(detectSkill(stateDir).installed).toBe(true);
+  });
+
+  it("镜像前缀只改变下载地址，安装前仍校验固定摘要", async () => {
+    const stateDir = tempDir();
+    let seenUrl = "";
+    await expect(installSkill({
+      stateDir,
+      sourceUrl: DEFAULT_SOURCE_URL,
+      mirror: "https://gh-proxy.com/",
+      downloader: async (url, dest) => {
+        seenUrl = url;
+        fs.writeFileSync(dest, "fake-archive");
+      },
+    })).rejects.toThrow("SHA-256 校验失败");
+    expect(seenUrl).toBe(`https://gh-proxy.com/${sourceToArchiveUrl(DEFAULT_SOURCE_URL)}`);
+    expect(detectSkill(stateDir).installed).toBe(false);
+  });
+
+  it("错误摘要会被拒绝且不写 meta", async () => {
+    const stateDir = tempDir();
+    let extracted = false;
+    await expect(installSkill({
+      stateDir,
+      sourceUrl: DEFAULT_SOURCE_URL,
+      downloader: async (_url, dest) => {
+        fs.writeFileSync(dest, "fake-archive");
+      },
+      extractor: async (_archive, rawDir) => {
+        extracted = true;
+        writeSkill(path.join(rawDir, "TodooCard_Skills-x"));
+      },
+    })).rejects.toThrow("SHA-256 校验失败");
+    expect(extracted).toBe(false);
+    expect(readSkillMeta(stateDir)).toBeNull();
+  });
+
+  it("自定义来源不做固定摘要校验，只记录实际摘要", async () => {
+    const stateDir = tempDir();
+    const meta = await installSkill({
+      stateDir,
+      sourceUrl: "https://github.com/a/b",
+      downloader: async (_url, dest) => {
+        fs.writeFileSync(dest, "fake-archive");
+      },
+      extractor: async (_archive, rawDir) => {
+        writeSkill(path.join(rawDir, "b-main"));
+      },
+    });
+    expect(meta.sha256).toHaveLength(64);
+    expect(meta.ref).toBe("b-main");
   });
 
   it("下载失败时保留旧 Skill", async () => {

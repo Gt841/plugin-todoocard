@@ -3,6 +3,7 @@ import App from "./ui/App.svelte";
 import { TodooService } from "./core/service";
 import { resolveStateDir } from "./core/paths";
 import { isImageFile } from "./core/image";
+import { MIRROR_PRESETS } from "./core/mirror";
 import fs from "fs";
 
 declare const window: any;
@@ -15,6 +16,7 @@ export default class TodoocardPlugin extends Plugin {
   private panel: any = null;
   private stateDir = "";
   private settingSource: HTMLInputElement | null = null;
+  private settingMirror: HTMLSelectElement | null = null;
   private settingAutoProbe: HTMLInputElement | null = null;
   private pasteTarget: HTMLElement | null = null;
 
@@ -50,6 +52,23 @@ export default class TodoocardPlugin extends Plugin {
         input.value = this.service.store.settings.sourceUrl;
         this.settingSource = input;
         return input;
+      },
+    });
+    this.setting.addItem({
+      title: "下载线路",
+      description: "直连 GitHub 较慢时可使用第三方加速；默认钉死来源的包会用固定 SHA-256 校验。",
+      createActionElement: () => {
+        const select = document.createElement("select");
+        select.className = "b3-select fn__block";
+        for (const item of MIRROR_PRESETS) {
+          const option = document.createElement("option");
+          option.value = item.value;
+          option.textContent = item.label;
+          select.appendChild(option);
+        }
+        select.value = this.service.store.settings.downloadMirror;
+        this.settingMirror = select;
+        return select;
       },
     });
     this.setting.addItem({
@@ -98,8 +117,9 @@ export default class TodoocardPlugin extends Plugin {
   }
 
   private saveSettings() {
-    const patch: { sourceUrl?: string; autoProbeAfterPair?: boolean } = {};
+    const patch: { sourceUrl?: string; downloadMirror?: string; autoProbeAfterPair?: boolean } = {};
     if (this.settingSource) patch.sourceUrl = this.settingSource.value;
+    if (this.settingMirror) patch.downloadMirror = this.settingMirror.value;
     if (this.settingAutoProbe) patch.autoProbeAfterPair = this.settingAutoProbe.checked;
     this.service.updateSettings(patch);
     this.refresh();
@@ -132,6 +152,7 @@ export default class TodoocardPlugin extends Plugin {
     this.panel = new App({ target, props: { view: this.service.getView() } });
 
     this.panel.$on("install", () => this.service.install(true));
+    this.panel.$on("installenv", () => this.service.installEnvironment());
     this.panel.$on("recheck", () => this.service.recheckPrereq());
     this.panel.$on("scan", () => this.service.scanDevices());
     this.panel.$on("stopscan", () => this.service.cancelJob());

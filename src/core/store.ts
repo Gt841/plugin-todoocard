@@ -1,14 +1,19 @@
 import fs from "fs";
-import path from "path";
 import type { DeviceInfo, PluginState, SavedDevice, Settings } from "../types";
 import { statePaths } from "./paths";
 
 /** 默认钉死的上游提交；更新时由维护者改这个常量并发新版插件。 */
 export const PINNED_COMMIT = "81f61e10c60ff0e7199749c67d090bb74252fd66";
 export const DEFAULT_SOURCE_URL = `https://github.com/Sunbelife/TodooCard_Skills/commit/${PINNED_COMMIT}`;
+/**
+ * 上面那个 commit 的 tarball SHA-256。无论走直连还是第三方加速，内容都必须与它一致，
+ * 防止镜像返回被替换或损坏的包。
+ */
+export const PINNED_SHA256 = "3fdde5a150dd967687af0e250d163b1f36ea378b1e13026f2bb6abe7fe7ce869";
 
 export const DEFAULT_SETTINGS: Settings = {
   sourceUrl: DEFAULT_SOURCE_URL,
+  downloadMirror: "",
   autoProbeAfterPair: true,
   rotateRight90: false,
 };
@@ -51,6 +56,7 @@ export function normalizeState(raw: any): PluginState {
   const settings = raw.settings && typeof raw.settings === "object" ? raw.settings : {};
   base.settings = {
     sourceUrl: str(settings.sourceUrl, DEFAULT_SOURCE_URL).trim() || DEFAULT_SOURCE_URL,
+    downloadMirror: str(settings.downloadMirror, "").trim(),
     autoProbeAfterPair: bool(settings.autoProbeAfterPair, true),
     rotateRight90: bool(settings.rotateRight90, false),
   };
@@ -105,6 +111,7 @@ export class StateStore {
   updateSettings(patch: Partial<Settings>): void {
     this.state.settings = { ...this.state.settings, ...patch };
     if (!this.state.settings.sourceUrl.trim()) this.state.settings.sourceUrl = DEFAULT_SOURCE_URL;
+    this.state.settings.downloadMirror = (this.state.settings.downloadMirror || "").trim();
     this.save();
   }
 

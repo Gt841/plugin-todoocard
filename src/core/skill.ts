@@ -1,11 +1,23 @@
 import fs from "fs";
 import path from "path";
 import { atomicReplaceDir, download, extractArchive, isZipUrl, runSpawn, sha256File, which } from "./fsutil";
+import { withDownloadMirror } from "./mirror";
 import { statePaths } from "./paths";
-import { DEFAULT_SOURCE_URL } from "./store";
+import { DEFAULT_SOURCE_URL, PINNED_COMMIT, PINNED_SHA256 } from "./store";
 import type { PrereqView, SkillView } from "../types";
 
 export { DEFAULT_SOURCE_URL };
+
+/**
+ * 默认来源钉死了 commit，因此可以对下载内容做内容寻址校验。用户改成别的
+ * commit / 分支后没有可预知摘要，只记录实际 SHA-256，不阻止安装。
+ */
+export function expectedSha256For(sourceUrl: string): string | null {
+  const m = sourceUrl.trim().match(
+    /^https?:\/\/github\.com\/sunbelife\/todoocard_skills\/commit\/([0-9a-f]{40})\/?$/i,
+  );
+  return m && m[1].toLowerCase() === PINNED_COMMIT ? PINNED_SHA256 : null;
+}
 
 export interface SkillMeta {
   sourceUrl: string;
@@ -116,6 +128,13 @@ export function detectSkill(stateDir: string, sourceUrl = DEFAULT_SOURCE_URL): S
 export interface InstallSkillOptions {
   stateDir: string;
   sourceUrl: string;
+  /** 可选下载加速前缀，例如 https://gh-proxy.com/。 */
+  mirror?: string;
+  /**
+   * 测试用摘要覆盖：省略时按默认钉死来源自动校验；
+   * 显式 null 表示跳过校验（仅单测注入假包时使用）。
+   */
+  expectedSha256?: string | null;
   onProgress?: (message: string) => void;
   downloader?: typeof download;
   extractor?: typeof extractArchive;
@@ -127,7 +146,11 @@ export async function installSkill(opts: InstallSkillOptions): Promise<SkillMeta
   const p = statePaths(opts.stateDir);
   const downloader = opts.downloader || download;
   const extractor = opts.extractor || extractArchive;
-  const archiveUrl = sourceToArchiveUrl(opts.sourceUrl);
+  const directUrl = sourceToArchiveUrl(opts.sourceUrl);
+  const archiveUrl = withDownloadMirror(directUrl, opts.mirror);
+  const expectedSha256 = opts.expectedSha256 === undefined
+    ? expectedSha256For(opts.sourceUrl)
+    : opts.expectedSha256;
   fs.mkdirSync(p.tmpDir, { recursive: true });
   fs.mkdirSync(p.cacheDir, { recursive: true });
   const archive = path.join(p.tmpDir, isZipUrl(archiveUrl) ? "skill.zip" : "skill.tar.gz");
@@ -139,10 +162,16 @@ export async function installSkill(opts: InstallSkillOptions): Promise<SkillMeta
   fs.mkdirSync(stageDir, { recursive: true });
 
   try {
+    if (archiveUrl !== directUrl) log(`下载线路：第三方加速（原始地址 ${directUrl}）`);
     log(`下载 Skill：${archiveUrl}`);
     await downloader(archiveUrl, archive);
     const sha256 = sha256File(archive);
     log(`下载完成（${(fs.statSync(archive).size / 1024 / 1024).toFixed(2)} MB）`);
+    if (expectedSha256 && sha256 !== expectedSha256) {
+      throw new Error(
+        `下载内容 SHA-256 校验失败，已拒绝安装（期望 ${expectedSha256.slice(0, 12)}…，实际 ${sha256.slice(0, 12)}…）`,
+      );
+    }
     log("解压并检查目录结构…");
     await extractor(archive, rawDir, isZipUrl(archiveUrl));
     const layout = normalizeSkillDir(rawDir, path.join(stageDir, "skill"));
